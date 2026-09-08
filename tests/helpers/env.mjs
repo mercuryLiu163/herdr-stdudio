@@ -71,6 +71,19 @@ export async function stopSession(name) {
 }
 
 let electronSeq = 0;
+const launchedProcs = new Set();
+
+/** Kill any app processes a test launched but never cleaned up. */
+export function killAllLaunchedApps() {
+  for (const p of launchedProcs) {
+    try {
+      if (p.exitCode === null) p.kill();
+    } catch {
+      /* already gone */
+    }
+  }
+  launchedProcs.clear();
+}
 
 /**
  * Launch the built app pointed at `socketPath` with a CDP port.
@@ -95,6 +108,8 @@ export async function launchApp({ socketPath, cdpPort, testLog, onExit }) {
   proc.stdout.on("data", (d) => logs.push(d.toString()));
   proc.stderr.on("data", (d) => logs.push(d.toString()));
   if (onExit) proc.once("exit", onExit);
+  launchedProcs.add(proc);
+  proc.once("exit", () => launchedProcs.delete(proc));
   proc.logs = logs;
   await sleep(700); // give the process a moment to fail fast if broken
   if (proc.exitCode !== null) {

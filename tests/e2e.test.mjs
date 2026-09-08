@@ -13,6 +13,7 @@ import {
   startSession,
   stopSession,
   launchApp,
+  killAllLaunchedApps,
   ensureArtifacts,
   PROJECT,
   ARTIFACTS,
@@ -468,6 +469,7 @@ async function main() {
 
 main().catch(async (e) => {
   console.error("[e2e] fatal:", e);
+  killAllLaunchedApps();
   try { await stopSession(SESSION); } catch {}
   process.exit(1);
 });
