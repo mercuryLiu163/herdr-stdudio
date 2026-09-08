@@ -4,3 +4,4 @@ dist-renderer/
 *.log
 screenshots/
 release/
+tests/artifacts/

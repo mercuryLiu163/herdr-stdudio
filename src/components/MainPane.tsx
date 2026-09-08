@@ -248,7 +248,9 @@ function Composer() {
     setError(null);
     try {
       if (agent) {
-        await agentPrompt(agent.name, text.trim());
+        // agent.* accepts the hosting pane id as target; more reliable than the
+        // display name, which detected agents often don't have.
+        await agentPrompt(agent.pane_id, text.trim());
       } else {
         await paneSendText(paneId, text);
       }
@@ -265,7 +267,7 @@ function Composer() {
   const interrupt = async (keys: string[]) => {
     if (!paneId) return;
     try {
-      if (agent) await agentSendKeys(agent.name, keys);
+      if (agent) await agentSendKeys(agent.pane_id, keys);
       else await paneSendKeys(paneId, keys);
       pushToast("info", `已发送 ${keys.join(" ")}`);
       setTimeout(() => void refreshPane(paneId), 300);

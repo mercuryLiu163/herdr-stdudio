@@ -16,8 +16,16 @@ let win: BrowserWindow | null = null;
 //   hub A — global workspace/tab/pane/agent state events
 //   hub B — output stream for the currently viewed pane (swapped on selection)
 let hubA: { subs: Subscription[]; sock: import("node:net").Socket } | null = null;
-let hubB: { paneId: string; sock: import("node:net").Socket } | null = null;
+let hubB: { paneId: string; state: PaneStreamState } | null = null;
 let hubADownTimer: NodeJS.Timeout | null = null;
+
+interface PaneStreamState {
+  paneId: string;
+  lastText: string;
+  stop: boolean;
+}
+
+const sleepMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function send(channel: string, ...args: unknown[]): void {
   if (win && !win.isDestroyed()) win.webContents.send(channel, ...args);
@@ -99,40 +107,87 @@ async function setPaneStream(paneId: string | null): Promise<void> {
   if (hubB) {
     const old = hubB;
     hubB = null;
-    old.sock.destroy();
+    old.state.stop = true;
   }
   if (!paneId) return;
-  hubBBackoff = 400;
-  await connectHubB(paneId);
+  const state: PaneStreamState = { paneId, lastText: "", stop: false };
+  hubB = { paneId, state };
+  void runPaneStream(state);
 }
 
-async function connectHubB(paneId: string): Promise<void> {
-  const cur = hubB;
-  if (cur && cur.paneId !== paneId) return;
-  try {
-    const sock = await client.openEventStream(
-      [
+/**
+ * Output stream for the viewed pane. `pane.output_matched` subscriptions turn
+ * out to be one-shot (single push on first match), and `events.wait` does not
+ * support output matches yet — so poll `pane.read` and forward on change.
+ */
+async function runPaneStream(state: PaneStreamState): Promise<void> {
+  while (!state.stop && hubB?.state === state) {
+    try {
+      const res = await client.rpc(
+        "pane.read",
         {
-          type: "pane.output_matched",
-          pane_id: paneId,
+          pane_id: state.paneId,
           source: "recent_unwrapped",
           lines: 400,
+          format: "ansi",
           strip_ansi: false,
-          match: { type: "regex", value: "" },
         },
-      ],
-      (ev) => send("herdr:event", ev),
-      () => {
-        if (hubB && hubB.paneId === paneId) {
-          hubBBackoff = Math.min(hubBBackoff * 2, 8000);
-          setTimeout(() => void connectHubB(paneId), hubBBackoff);
-        }
-      },
-    );
-    hubB = { paneId, sock };
-  } catch {
-    // Pane may have been closed; renderer will re-call setPaneStream if needed.
+        8000,
+      );
+      if (state.stop || hubB?.state !== state) break;
+      const read = (res as { read?: { text?: string; revision?: number } }).read;
+      if (read && typeof read.text === "string" && read.text !== state.lastText) {
+        state.lastText = read.text;
+        send("herdr:event", { event: "studio.pane_output", data: { read } });
+      }
+    } catch {
+      // Pane closed or server restarting; loop on and pick up recovery.
+    }
+    await sleepMs(600);
   }
+}
+
+/**
+ * Agent-status watcher. Status transitions for background panes have no global
+ * push channel (`pane.agent_status_changed` subscriptions are per-pane), so
+ * poll `agent.list` and synthesize transition events for the renderer.
+ */
+let lastAgentStatus = new Map<string, string>();
+let agentsObserved = false;
+
+function startAgentStatusWatcher(): void {
+  setInterval(() => {
+    void (async () => {
+      try {
+        const res = await client.rpc("agent.list", {}, 8000);
+        const agents = (res as { agents?: Array<{ pane_id: string; agent_status: string }> })
+          .agents ?? [];
+        const seen = new Set<string>();
+        for (const a of agents) {
+          seen.add(a.pane_id);
+          const prev = lastAgentStatus.get(a.pane_id);
+          // Notify on any observed transition; a brand-new agent that already
+          // sits in blocked/done also warrants a notification (its earlier
+          // states were simply never observed by this poller).
+          const firstSeenNeedsNotice =
+            prev === undefined && (a.agent_status === "blocked" || a.agent_status === "done");
+          if (agentsObserved && (firstSeenNeedsNotice || (prev !== undefined && prev !== a.agent_status))) {
+            send("herdr:event", {
+              event: "pane_agent_status_changed",
+              data: { pane_id: a.pane_id, agent_status: a.agent_status },
+            });
+          }
+          lastAgentStatus.set(a.pane_id, a.agent_status);
+        }
+        for (const gone of [...lastAgentStatus.keys()]) {
+          if (!seen.has(gone)) lastAgentStatus.delete(gone);
+        }
+        agentsObserved = true;
+      } catch {
+        /* server down; retry next tick */
+      }
+    })();
+  }, 3000);
 }
 
 function registerIpc(): void {
@@ -150,6 +205,18 @@ function registerIpc(): void {
   });
   ipcMain.handle("herdr:socket-info", () => socketDescription());
   ipcMain.handle("herdr:notify", (_e, opts: { title: string; body: string }) => {
+    // Test seam: record notifications to a JSONL file when running E2E tests.
+    const testLog = process.env.HERDR_STUDIO_TEST_LOG;
+    if (testLog) {
+      try {
+        require("node:fs").appendFileSync(
+          testLog,
+          JSON.stringify({ title: opts.title, body: opts.body, at: Date.now() }) + "\n",
+        );
+      } catch {
+        /* best effort */
+      }
+    }
     if (Notification.isSupported()) {
       new Notification({ title: opts.title, body: opts.body, silent: false }).show();
     }
@@ -221,6 +288,7 @@ async function createWindow(): Promise<void> {
 
 app.whenReady().then(async () => {
   registerIpc();
+  startAgentStatusWatcher();
   await createWindow();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) void createWindow();
@@ -229,6 +297,6 @@ app.whenReady().then(async () => {
 
 app.on("window-all-closed", () => {
   if (hubA) hubA.sock.destroy();
-  if (hubB) hubB.sock.destroy();
+  if (hubB) hubB.state.stop = true;
   app.quit();
 });

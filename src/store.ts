@@ -116,7 +116,8 @@ const STATE_EVENTS = new Set([
   "pane_exited",
   "pane_agent_detected",
   "layout_updated",
-  "pane_agent_status_changed",
+  // NOTE: pane_agent_status_changed is handled by its own branch below — it
+  // must trigger both a snapshot refresh AND blocked/done notifications.
 ]);
 
 export const useStore = create<StudioState>((set, get) => ({
@@ -268,7 +269,7 @@ export const useStore = create<StudioState>((set, get) => ({
       scheduleSnapshotRefresh(get);
       return;
     }
-    if (ev.event === "pane.output_matched") {
+    if (ev.event === "studio.pane_output" || ev.event === "pane.output_matched") {
       const read = ev.data?.read;
       if (!read?.pane_id) return;
       // Only the viewed pane is streamed; ignore stale pushes after switches.
