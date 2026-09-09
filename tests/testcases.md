@@ -101,3 +101,16 @@
 - A/D 层全用例通过；B/C/E/F 至少 95% 通过（E2 有 10s 容忍窗口仍失败才判 fail）。
 - 每个失败必须附：复现步骤、实际 vs 预期、相关日志/截图（存 `tests/artifacts/`）。
 - 结束后 `herdr session list` 中无 `studio-e2e-*` 残留；无孤儿 Electron 进程。
+
+---
+
+## H. Playwright Test 执行层(2026-09-10 新增)
+
+`tests/playwright/` 下的 Playwright Test 套件复用本文档的用例编号作为测试标题前缀,
+隔离会话与安全红线约定完全一致(前缀 `studio-pw-*`,经 `tests/helpers/env.mjs` 起停):
+
+- 运行:`npm run test:e2e`(= `npx playwright test`);报告:`npm run test:e2e:report`
+- B1–B3 → `b-lifecycle.spec.mjs`;C4–C6 → `c-render.spec.mjs`
+- D4 → `d-interaction.spec.mjs`;E1 → `e-resilience.spec.mjs`
+- V2 PRD 契约 F1–F4 → `v2-acceptance.spec.mjs`(`test.fixme` 骨架,实现后翻绿)
+- 其余用例(A 协议层、D6–D13、E2–E3、F1 冒烟)仍由 `node tests/run-all.mjs` 执行
