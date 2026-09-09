@@ -249,12 +249,20 @@ async function createWindow(): Promise<void> {
     },
   });
 
+  // Register before loadURL: in dev the page can paint while loadURL is still
+  // awaiting, and a late listener would miss ready-to-show — window never shows.
+  win.once("ready-to-show", () => win?.show());
+
   const devUrl = process.env.ELECTRON_RENDERER_URL;
   if (devUrl) {
-    await win.loadURL(devUrl);
+    await win.loadURL(devUrl).catch(() => {});
   } else {
     await win.loadFile(path.join(__dirname, "..", "dist-renderer", "index.html"));
   }
+  // Belt and braces: if ready-to-show never fired (slow first paint), show anyway.
+  setTimeout(() => {
+    if (win && !win.isDestroyed() && !win.isVisible()) win.show();
+  }, 1500);
 
   // Debug hook: `electron . --screenshot=<path> [--exit]` captures the UI
   // once the renderer reports it is ready with data.
@@ -280,7 +288,6 @@ async function createWindow(): Promise<void> {
     void Promise.race([trigger, fallback]).then(() => setTimeout(capture, 900));
   }
 
-  win.once("ready-to-show", () => win?.show());
   win.on("closed", () => {
     win = null;
   });

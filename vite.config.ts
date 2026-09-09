@@ -10,6 +10,9 @@ export default defineConfig({
     emptyOutDir: true,
   },
   server: {
+    // Bind IPv4 explicitly: Electron's Chromium connects to 127.0.0.1 for
+    // "localhost", and a ::1-only Vite listener leaves the window hidden.
+    host: "127.0.0.1",
     port: 5173,
     strictPort: true,
   },
