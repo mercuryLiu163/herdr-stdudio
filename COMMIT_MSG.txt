@@ -1,0 +1,8 @@
+feat(v3): 合并侧栏 / 沉浸式对话流 / 统一模式性能与输入目标
+
+F1 工作区标签合并：独立标签列移除，标签成为工作区行内展开子项（.ws-item/.tab-item 类名保留，V1 e2e 零修补通过）；aria pin 态与子行可见性解耦模型，chevron 跟随可见性
+F2 沉浸式对话流：chat-immersive 全幅原生渲染表面（无 reader-card/TUI 感）；assistant 正文 marked 渲染 + highlight.js 双主题语法着色（17 类 token 规则）；tool-chip hash 色相徽标；图片路径内联（fs:read 通道 + 小图最小可见尺寸）；块级 memo + 稳定 key 流式更新
+F3 统一模式：MosaicCell 按需订阅 + ANSI 解析缓存（FIFO64）+ pane.layout 盲轮询移除（事件/拖拽驱动）+ 拖拽 DOM transform 预览松手提交（实测 amount 为 ratio 增量）；composer 输入目标下拉（input-target）与 cell 选中高亮（mosaic-pane-selected）双向同步
+
+测试：Playwright 31 passed / 4 skipped / 0 failed；V1 回归（协议 12 + e2e 25 + 冒烟 1）ALL GREEN；typecheck 通过
+流程：TDD 契约先行 - 实现 subagent - 评审 subagent（APPROVE-WITH-NITPICKS 全项修复）- judge 视觉验收 3/3 通过（含一轮视觉修复：小图可见性/字符串色相/chevron）

@@ -1,6 +1,6 @@
 /**
- * F4 chat view: parse a pane's `recent_unwrapped` transcript into structured
- * conversation blocks.
+ * Chat view parser: parse a pane's `recent_unwrapped` transcript into
+ * structured conversation blocks.
  *
  * Pure functions, no React/DOM dependency. Rules are marker heuristics
  * (deliberately not bound to one agent's TUI):
@@ -13,16 +13,29 @@
  *        - `❯ ` / `> ` prefixed line            → user message
  *        - shell-prompt + typed command         → user message
  *          (starship `… HH:MM > cmd`, `PS …>`, `C:\…>`, `user@host:~$`)
- *        - `⏺` / `●` / `• ` prefixed line       → tool call card
- *        - ``` fenced run                       → code block
- *        - everything else                      → assistant prose (newlines kept)
+ *        - `⏺` / `●` / `• ` prefixed line       → tool call (name + summary)
+ *        - ``` fenced run                       → code block (+ fence language)
+ *        - everything else                      → assistant prose = markdown
+ *                                                 source (newlines kept)
+ *
+ * V3 F2 additions: assistant `text` is the markdown source; tool blocks carry
+ * `toolName` (colored chip) and the full body as `text`; image file paths found
+ * in assistant/tool text are pulled out into `images` (and removed from the
+ * text, so the bare path never renders as prose); code blocks carry `lang`.
  */
 
 export type BlockType = "user" | "assistant" | "tool" | "code" | "meta";
 
 export interface Block {
   type: BlockType;
+  /** user: typed text · assistant: markdown source · tool: full body · code: verbatim */
   text: string;
+  /** tool blocks: the tool identifier shown in the chip */
+  toolName?: string;
+  /** code blocks: fence language (lower-cased), "" when absent */
+  lang?: string;
+  /** assistant / tool blocks: image paths extracted out of `text` */
+  images?: string[];
 }
 
 /** Remove ANSI escape sequences (CSI, OSC, charset selection, stray C0). */
@@ -75,6 +88,50 @@ function extractUserInput(line: string): string | null {
   return null;
 }
 
+/** Image extensions we inline (must also be readable through fs:read). */
+export const IMAGE_EXT_RE = /\.(?:png|jpe?g|gif|webp|svg)$/i;
+
+/**
+ * A file-path-looking token ending in an image extension: optional drive
+ * letter, then path characters, then the extension at a word boundary.
+ * Quotes/brackets/backticks around the path are not part of the match.
+ * A leading boundary (line start, whitespace, or an opening bracket/quote/
+ * assignment character) is REQUIRED, so the tail of a URL in prose
+ * (`https://cdn.example/img/logo.png`) is no longer ripped out — the segment
+ * after the last `/` has no boundary before it (review #4).
+ */
+const IMAGE_PATH_RE =
+  /(?<=^|[\s([{"'`=~*>（「《【])(?:[A-Za-z]:[\\/])?(?:[\w.~-]+[\\/])*[\w.~-]+\.(?:png|jpe?g|gif|webp|svg)(?![\w.])/gim;
+
+/** Pull image paths out of prose; returns the remaining text and the paths. */
+export function extractImagePaths(text: string): { text: string; images: string[] } {
+  const images: string[] = [];
+  const stripped = text.replace(IMAGE_PATH_RE, (m) => {
+    if (!images.includes(m)) images.push(m);
+    return "";
+  });
+  if (!images.length) return { text, images };
+  const cleaned = stripped
+    .split("\n")
+    .map((l) => l.replace(/[ \t]{2,}/g, " ").trimEnd())
+    .join("\n")
+    .trim();
+  return { text: cleaned, images };
+}
+
+/**
+ * Tool identifier for the chip: `Name(args)` style → Name; otherwise the
+ * first ASCII identifier in the body (e.g. "运行 npm test" → "npm"); otherwise
+ * the first whitespace-delimited token.
+ */
+export function toolNameOf(body: string): string {
+  const call = body.match(/^([A-Za-z_][\w.-]*)\s*\(/);
+  if (call) return call[1];
+  const ascii = body.match(/[A-Za-z_][\w.+-]*/);
+  if (ascii) return ascii[0];
+  return body.split(/\s+/)[0] ?? "tool";
+}
+
 /** Parse a full transcript into ordered blocks. */
 export function parseTranscript(text: string): Block[] {
   const clean = stripAnsi(text).replace(/\r/g, "");
@@ -82,13 +139,25 @@ export function parseTranscript(text: string): Block[] {
 
   const blocks: Block[] = [];
   let assistantBuf: string[] = [];
-  let codeBuf: string[] | null = null;
+  let codeBuf: { lang: string; lines: string[] } | null = null;
 
   const flushAssistant = () => {
     if (!assistantBuf.length) return;
     const joined = assistantBuf.join("\n").trim();
     assistantBuf = [];
-    if (joined) blocks.push({ type: "assistant", text: joined });
+    if (!joined) return;
+    const { text: md, images } = extractImagePaths(joined);
+    if (!md && !images.length) return;
+    const block: Block = { type: "assistant", text: md };
+    if (images.length) block.images = images;
+    blocks.push(block);
+  };
+
+  const flushCode = () => {
+    if (codeBuf === null) return;
+    const body = codeBuf.lines.join("\n").replace(/\s+$/, "");
+    if (body) blocks.push({ type: "code", text: body, lang: codeBuf.lang });
+    codeBuf = null;
   };
 
   for (const raw of lines) {
@@ -97,13 +166,8 @@ export function parseTranscript(text: string): Block[] {
 
     // Inside a fenced code block: collect verbatim until the closing fence.
     if (codeBuf !== null) {
-      if (/^```/.test(trimmed)) {
-        const body = codeBuf.join("\n").replace(/\s+$/, "");
-        if (body) blocks.push({ type: "code", text: body });
-        codeBuf = null;
-      } else {
-        codeBuf.push(line);
-      }
+      if (/^```/.test(trimmed)) flushCode();
+      else codeBuf.lines.push(line);
       continue;
     }
 
@@ -112,10 +176,11 @@ export function parseTranscript(text: string): Block[] {
     // Drop rule/box decoration lines.
     if (isSeparatorLine(trimmed)) continue;
 
-    // Fenced code opens.
-    if (/^```/.test(trimmed)) {
+    // Fenced code opens (optionally with a language tag).
+    const fence = trimmed.match(/^```\s*([\w+#.-]*)/);
+    if (fence) {
       flushAssistant();
-      codeBuf = [];
+      codeBuf = { lang: (fence[1] ?? "").toLowerCase(), lines: [] };
       continue;
     }
 
@@ -140,7 +205,12 @@ export function parseTranscript(text: string): Block[] {
     if (tool) {
       flushAssistant();
       const body = (tool[1] ?? "").trim();
-      if (body) blocks.push({ type: "tool", text: body });
+      if (body) {
+        const { text: summary, images } = extractImagePaths(body);
+        const block: Block = { type: "tool", text: summary || body, toolName: toolNameOf(body) };
+        if (images.length) block.images = images;
+        blocks.push(block);
+      }
       continue;
     }
 
@@ -148,10 +218,7 @@ export function parseTranscript(text: string): Block[] {
   }
 
   // Unterminated fence: flush what we collected as code.
-  if (codeBuf !== null) {
-    const body = codeBuf.join("\n").replace(/\s+$/, "");
-    if (body) blocks.push({ type: "code", text: body });
-  }
+  flushCode();
   flushAssistant();
 
   return blocks;

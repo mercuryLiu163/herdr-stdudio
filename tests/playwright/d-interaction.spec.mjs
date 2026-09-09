@@ -13,7 +13,8 @@ test("D4 shell 命令发送:composer 输入 echo 后 reader 出现标记", async
   // 输出轮询链路(主进程 600ms 轮询 → 渲染层)回显标记
   await expect(win.getByTestId("reader-card")).toContainText(marker, { timeout: 10_000 });
 
-  // server 侧复核
+  // server 侧复核(testcases D4:用 pane.read,而非 session.snapshot——后者不含输出)
   const snap = await session.api.snapshot(session.socket);
-  expect(JSON.stringify(snap)).toContain(marker);
+  const read = await session.api.paneRead(session.socket, snap.focused_pane_id);
+  expect(JSON.stringify(read)).toContain(marker);
 });

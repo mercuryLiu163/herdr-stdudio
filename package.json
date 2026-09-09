@@ -1,7 +1,7 @@
 {
   "name": "herdr-studio",
   "productName": "Herdr Studio",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A polished desktop cockpit for the herdr terminal workspace server",
   "main": "dist-electron/main.js",
   "private": true,
@@ -41,6 +41,7 @@
   },
   "dependencies": {
     "anser": "^2.2.0",
+    "highlight.js": "^11.12.0",
     "marked": "^18.0.12",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

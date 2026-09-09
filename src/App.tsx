@@ -2,7 +2,6 @@ import { useEffect } from "react";
 import { useStore } from "./store";
 import { TitleBar, Rail } from "./components/Chrome";
 import { Sidebar } from "./components/Sidebar";
-import { TabList } from "./components/TabList";
 import { MainPane } from "./components/MainPane";
 import { RightSidebar } from "./components/RightSidebar";
 import { Toasts } from "./components/Toasts";
@@ -36,7 +35,6 @@ export function App() {
       <div className="shell-body">
         <Rail />
         <Sidebar />
-        <TabList />
         <MainPane />
         {rightSidebarOpen && <RightSidebar />}
       </div>

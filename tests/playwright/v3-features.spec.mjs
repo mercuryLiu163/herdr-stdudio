@@ -54,10 +54,14 @@ test.describe("F2 immersive chat", () => {
   async function seedAgentTranscript() {
     const { sock, pane2 } = ctx;
     // markdown + tool + image path + plain text
+    // NOTE(test-fix): the fence echos use SINGLE quotes. herdr's bundled shell
+    // is POSIX-ish — inside double quotes the backticks of `echo "```js"` open
+    // a command substitution and the pane sits at the `∙` continuation prompt
+    // forever, so the seeded lines never execute and no transcript appears.
     await api.paneSendInput(
       sock,
       pane2.pane_id,
-      'echo "\u276f 帮我生成报告"; echo "\u23fa 运行 npm test"; echo "报告包含 **加粗结论** 与图片 tests/fixtures/sample.png"; echo "```js"; echo "const x = 1;"; echo "```"',
+      'echo "\u276f 帮我生成报告"; echo "\u23fa 运行 npm test"; echo "报告包含 **加粗结论** 与图片 tests/fixtures/sample.png"; echo \'```js\'; echo "const x = 1;"; echo \'```\'',
     );
     await api.paneReportAgent(sock, pane2.pane_id, "e2e-fake", "working");
   }

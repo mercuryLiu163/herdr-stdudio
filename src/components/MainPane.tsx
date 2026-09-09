@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, MouseEvent as ReactMouseEvent } from "react";
 import { useStore, agentForPane, agentDisplayName } from "../store";
 import { AnsiView } from "../ansi";
 import { parseTranscript } from "../chat-parser";
+import type { Block } from "../chat-parser";
+import { renderMarkdown, highlightCode } from "../markdown";
 import type { PaneLayout, PaneLayoutEntry, PaneRect } from "../types";
 import { paneLayout, paneResize, agentPrompt, paneSendText, paneSendKeys, agentSendKeys } from "../api";
 import { IconBook, IconSend, IconTerminal } from "./icons";
@@ -36,11 +38,15 @@ type ViewMode = "chat" | "raw";
 export function MainPane() {
   const activeTabId = useStore((s) => s.activeTabId);
   const activePaneId = useStore((s) => s.activePaneId);
-  const tab = useStore((s) => s.tabs.find((t) => t.tab_id === s.activeTabId) ?? null);
-  const panes = useStore((s) => s.panes.filter((p) => p.tab_id === s.activeTabId));
-  const pane = useStore((s) => s.panes.find((p) => p.pane_id === s.activePaneId) ?? null);
+  const tabs = useStore((s) => s.tabs);
+  const panes = useStore((s) => s.panes);
   const agents = useStore((s) => s.agents);
-  const agent = useStore((s) => agentForPane(s.agents, s.activePaneId));
+  // NOTE: selectors above return stable references between snapshots, so the
+  // main header does NOT re-render on every pane-output tick (V3 F3 perf).
+  const tab = useMemo(() => tabs.find((t) => t.tab_id === activeTabId) ?? null, [tabs, activeTabId]);
+  const panesOfTab = useMemo(() => panes.filter((p) => p.tab_id === activeTabId), [panes, activeTabId]);
+  const pane = useMemo(() => panes.find((p) => p.pane_id === activePaneId) ?? null, [panes, activePaneId]);
+  const agent = useMemo(() => agentForPane(agents, activePaneId), [agents, activePaneId]);
   const selectPane = useStore((s) => s.selectPane);
   const status = useStore((s) => s.status);
   const layoutMode = useStore((s) => s.layoutMode);
@@ -148,9 +154,9 @@ export function MainPane() {
             )}
           </div>
         </div>
-        {panes.length > 0 && (
+        {panesOfTab.length > 0 && (
           <div className="pane-chips">
-            {panes.map((p) => {
+            {panesOfTab.map((p) => {
               const a = agents.find((x) => x.pane_id === p.pane_id);
               const shortId = p.pane_id.split(":p")[1] ?? "";
               return (
@@ -242,7 +248,7 @@ function OutputReader() {
             读取输出失败。窗格可能刚刚关闭，或处于 alternate screen（如 vim / htop）。
           </div>
         ) : output?.text ? (
-          <AnsiView text={output.text} />
+          <AnsiView text={output.text} paneId={paneId} />
         ) : output?.loading || status !== "connected" ? (
           <div style={{ color: "var(--text-faint)", padding: "8px 0" }}>正在读取输出…</div>
         ) : (
@@ -308,14 +314,50 @@ function ReaderMeta({
   );
 }
 
-/** F4 chat view: the pane transcript parsed into a conversation thread. */
+/**
+ * V3 F2 immersive chat: the pane transcript rendered as a full-bleed native
+ * conversation surface — no `.reader-card` wrapper, no TUI text dump. Markdown
+ * for assistant prose (marked + hljs), colored tool chips, inline images via
+ * the fs:read data-URL channel, block-level memoized rendering so a streaming
+ * update only repaints the changed tail block.
+ */
 function ChatView() {
   const paneId = useStore((s) => s.activePaneId);
   const output = useStore((s) => (s.activePaneId ? s.outputs[s.activePaneId] : undefined));
+  const panes = useStore((s) => s.panes);
   const agents = useStore((s) => s.agents);
   const refresh = useStore((s) => s.refreshPaneOutput);
   const status = useStore((s) => s.status);
   const agent = agentForPane(agents, paneId);
+  const cwd = useMemo(
+    () => panes.find((p) => p.pane_id === paneId)?.cwd ?? null,
+    [panes, paneId],
+  );
+  // All known cwds: fallback bases when a transcript references an image by a
+  // path relative to another pane of the session.
+  const cwds = useMemo(() => {
+    const out: string[] = [];
+    for (const p of panes) {
+      const c = (p.cwd ?? "").trim();
+      if (c && !out.includes(c)) out.push(c);
+    }
+    return out;
+  }, [panes]);
+
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const stick = useRef(true);
+
+  // Follow streaming output while pinned to the bottom.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el && stick.current) el.scrollTop = el.scrollHeight;
+  }, [output?.text, paneId]);
+
+  useEffect(() => {
+    stick.current = true;
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [paneId]);
 
   if (!paneId) {
     return (
@@ -330,15 +372,24 @@ function ChatView() {
   }
 
   return (
-    <div className="reader-wrap">
-      <div className="reader-card chat-card" data-testid="reader-card">
+    <div className="chat-immersive" data-testid="chat-immersive">
+      <div className="chat-immersive-head">
         <ReaderMeta agent={agent} output={output} paneId={paneId} refresh={refresh} />
+      </div>
+      <div
+        className="chat-scroll"
+        ref={scrollRef}
+        onScroll={(e) => {
+          const el = e.currentTarget;
+          stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+        }}
+      >
         {output?.failed && !output?.text ? (
           <div className="chat-thread" data-testid="chat-thread">
             <div className="chat-empty">读取输出失败。窗格可能刚刚关闭，或处于 alternate screen。</div>
           </div>
         ) : output?.text ? (
-          <ChatThread text={output.text} />
+          <ChatThread text={output.text} cwd={cwd} cwds={cwds} />
         ) : output?.loading || status !== "connected" ? (
           <div className="chat-thread" data-testid="chat-thread">
             <div className="chat-empty">正在读取输出…</div>
@@ -353,119 +404,276 @@ function ChatView() {
   );
 }
 
-function firstLine(text: string): string {
-  const line = text.split("\n", 1)[0] ?? "";
-  return line.length > 160 ? line.slice(0, 159) + "…" : line;
+/** Stable key per block position; parse is deterministic so indices don't shift mid-stream. */
+function blockKey(b: Block, i: number): string {
+  return `${i}:${b.type}`;
 }
 
-function ChatThread({ text }: { text: string }) {
+function sameBlock(a: Block, b: Block): boolean {
+  return (
+    a.type === b.type &&
+    a.text === b.text &&
+    a.toolName === b.toolName &&
+    a.lang === b.lang &&
+    (a.images ?? []).join("\n") === (b.images ?? []).join("\n")
+  );
+}
+
+function ChatThread({ text, cwd, cwds }: { text: string; cwd: string | null; cwds: string[] }) {
   const blocks = useMemo(() => parseTranscript(text), [text]);
   return (
     <div className="chat-thread" data-testid="chat-thread">
       {blocks.length === 0 && <div className="chat-empty">暂无对话内容。</div>}
-      {blocks.map((b, i) => {
-        switch (b.type) {
-          case "user":
-            return (
-              <div key={i} className="chat-msg user" data-testid="msg-user">
-                <div className="chat-bubble">{b.text}</div>
-              </div>
-            );
-          case "assistant":
-            return (
-              <div key={i} className="chat-msg assistant" data-testid="msg-assistant">
-                {b.text}
-              </div>
-            );
-          case "tool":
-            return (
-              <details key={i} className="chat-msg tool" data-testid="msg-tool">
-                <summary>
-                  <span className="chat-tool-tag">tool</span>
-                  {firstLine(b.text)}
-                </summary>
-                <pre>{b.text}</pre>
-              </details>
-            );
-          case "code":
-            return (
-              <pre key={i} className="chat-msg code" data-testid="msg-code">
-                {b.text}
-              </pre>
-            );
-          case "meta":
-            return (
-              <div key={i} className="chat-meta" data-testid="msg-meta">
-                {b.text}
-              </div>
-            );
-          default:
-            return null;
-        }
-      })}
+      {blocks.map((b, i) => (
+        <ChatBlock key={blockKey(b, i)} block={b} cwd={cwd} cwds={cwds} />
+      ))}
     </div>
   );
 }
 
 /**
+ * One parsed transcript block. memo + content comparator: when a streaming
+ * update re-parses the transcript, only blocks whose parsed content actually
+ * changed (in practice the tail) re-render.
+ */
+const ChatBlock = memo(
+  function ChatBlock({ block, cwd, cwds }: { block: Block; cwd: string | null; cwds: string[] }) {
+    switch (block.type) {
+      case "user":
+        return (
+          <div className="chat-msg user" data-testid="msg-user">
+            <div className="chat-bubble">{block.text}</div>
+          </div>
+        );
+      case "assistant":
+        return (
+          <div className="chat-msg assistant" data-testid="msg-assistant">
+            <MarkdownBody text={block.text} />
+            {(block.images ?? []).map((img) => (
+              <ChatImage key={img} path={img} cwd={cwd} cwds={cwds} />
+            ))}
+          </div>
+        );
+      case "tool":
+        return (
+          <details className="chat-msg tool" data-testid="msg-tool">
+            <summary>
+              <span className="tool-chip" data-testid="tool-chip" style={{ "--chip-hue": hashHue(block.toolName ?? "tool") } as CSSProperties}>
+                <span className="tool-chip-name">{block.toolName ?? "tool"}</span>
+              </span>
+              <span className="tool-summary">{block.text}</span>
+            </summary>
+            <pre>{block.text}</pre>
+            {(block.images ?? []).map((img) => (
+              <div className="chat-tool-images" key={img}>
+                <ChatImage path={img} cwd={cwd} cwds={cwds} />
+              </div>
+            ))}
+          </details>
+        );
+      case "code":
+        return (
+          <pre className="chat-msg code" data-testid="msg-code">
+            <CodeBody text={block.text} lang={block.lang} />
+          </pre>
+        );
+      case "meta":
+        return (
+          <div className="chat-meta" data-testid="msg-meta">
+            {block.text}
+          </div>
+        );
+      default:
+        return null;
+    }
+  },
+  (a, b) => a.cwd === b.cwd && a.cwds === b.cwds && sameBlock(a.block, b.block),
+);
+
+/** Markdown → sanitised HTML (escaped source, guarded links, hljs code). */
+function MarkdownBody({ text }: { text: string }) {
+  const html = useMemo(() => renderMarkdown(text, { stripImages: true }), [text]);
+  return <div className="chat-md" dangerouslySetInnerHTML={{ __html: html }} />;
+}
+
+/** Fenced code with syntax colouring (highlight.js escapes its input). */
+function CodeBody({ text, lang }: { text: string; lang?: string }) {
+  const html = useMemo(() => highlightCode(text, lang), [text, lang]);
+  return <code className="hljs" dangerouslySetInnerHTML={{ __html: html }} />;
+}
+
+/** Deterministic hue per tool name so chips are color-coded consistently. */
+function hashHue(s: string): number {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return h % 360;
+}
+
+const isAbsolutePath = (p: string) =>
+  /^[A-Za-z]:[\\/]/.test(p) || p.startsWith("\\\\") || p.startsWith("/");
+
+function joinPath(base: string, rel: string): string {
+  const b = base.replace(/[\\/]+$/, "");
+  return /[\\/]$/.test(b) ? b + rel : b + (b.includes("\\") ? "\\" : "/") + rel;
+}
+
+/**
+ * Inline image for a file path found in assistant/tool text (V3 F2). Paths are
+ * resolved against the active pane's cwd (then other known pane cwds, then by
+ * basename) and loaded through the existing fs:read data-URL channel — exactly
+ * the trust model of the right sidebar preview. Unreadable paths degrade to a
+ * faint path label; nothing is fetched from the network.
+ */
+function ChatImage({ path, cwd, cwds }: { path: string; cwd: string | null; cwds: string[] }) {
+  const [resolved, setResolved] = useState<{ src: string; title: string } | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setResolved(null);
+    setFailed(false);
+    // Candidates in trust order: exact joined path per known cwd first, then a
+    // weak basename-only fallback (may be a different file with the same name).
+    const candidates: Array<{ abs: string; fallback: boolean }> = [];
+    const push = (abs: string, fallback: boolean) => {
+      if (!candidates.some((c) => c.abs === abs)) candidates.push({ abs, fallback });
+    };
+    if (isAbsolutePath(path)) push(path, false);
+    else {
+      const bases = [cwd, ...cwds].filter((c): c is string => !!c);
+      for (const b of bases) push(joinPath(b, path), false);
+      const base = path.split(/[\\/]/).pop() ?? path;
+      for (const b of bases) push(joinPath(b, base), true);
+    }
+    (async () => {
+      for (const cand of candidates) {
+        try {
+          const res = await window.herdr.fsRead(cand.abs);
+          if (res?.kind === "image") {
+            if (!cancelled) {
+              setResolved({
+                src: res.data,
+                // Review #3: expose what actually resolved; flag the weak
+                // basename fallback so misresolved images are identifiable.
+                title: (cand.fallback ? "basename 兜底：" : "") + cand.abs,
+              });
+            }
+            return;
+          }
+        } catch {
+          /* try next candidate */
+        }
+      }
+      if (!cancelled) setFailed(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [path, cwd, cwds]);
+
+  if (resolved) {
+    return (
+      <img
+        className="chat-image"
+        data-testid="chat-image"
+        src={resolved.src}
+        alt={path}
+        title={resolved.title}
+      />
+    );
+  }
+  if (failed) {
+    return <span className="chat-image-missing">{path}</span>;
+  }
+  return null;
+}
+
+/**
  * F3 unified layout: every pane of the active tab positioned by the herdr
- * `pane.layout` rect snapshot (percentages of the tab area), draggable
- * splitters between cells that call `pane.resize` and re-snapshot.
+ * `pane.layout` rect snapshot. V3 F3 performance contract:
+ *   (a) cells are `React.memo` components that subscribe to their OWN
+ *       `outputs[paneId]` slice — the mosaic never re-renders because one
+ *       cell's text changed;
+ *   (b) ANSI→HTML goes through the per-pane cache in ansi.tsx (`paneId` prop);
+ *   (c) no blind `pane.layout` polling — the snapshot is (re)fetched on mount,
+ *       pane-set change, every store snapshot refresh (which `layout.updated`
+ *       and other state events trigger), and around drag operations;
+ *   (d) dragging previews via local transforms written straight to the DOM;
+ *       `pane.resize` is committed only on mouse-up.
  */
 function Mosaic() {
-  const panes = useStore((s) => s.panes.filter((p) => p.tab_id === s.activeTabId));
-  const activeTabId = useStore((s) => s.activeTabId);
-  const outputs = useStore((s) => s.outputs);
+  // pane ids joined → stable string selector; identity changes only when the
+  // tab's pane set changes (not on output ticks).
+  const paneIds = useStore((s) =>
+    s.panes
+      .filter((p) => p.tab_id === s.activeTabId)
+      .map((p) => p.pane_id)
+      .join(","),
+  );
+  const activePaneId = useStore((s) => s.activePaneId);
+  const selectPane = useStore((s) => s.selectPane);
   const refreshPaneOutput = useStore((s) => s.refreshPaneOutput);
-  const agents = useStore((s) => s.agents);
+  const snapshot = useStore((s) => s.snapshot);
   const [layout, setLayout] = useState<PaneLayout | null>(null);
+  const layoutRef = useRef<PaneLayout | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
+  const cellRefs = useRef(new Map<string, HTMLDivElement>());
+  const splitterRefs = useRef(new Map<string, HTMLDivElement>());
 
-  const anyPaneId = panes[0]?.pane_id ?? null;
+  const anyPaneId = paneIds ? paneIds.split(",")[0] : null;
 
   const refetch = useCallback(async () => {
-    if (!anyPaneId) return;
-    try {
-      const res = await paneLayout(anyPaneId);
-      setLayout(res.layout ?? null);
-      setLoadError(null);
-    } catch (err: any) {
-      setLoadError(String(err?.message ?? err));
-    }
-  }, [anyPaneId]);
-
-  // 1s layout snapshot polling while in unified mode (PRD), plus first fetch.
-  // With no panes left in the tab: drop the stale snapshot and stop the timer.
-  useEffect(() => {
     if (!anyPaneId) {
+      layoutRef.current = null;
       setLayout(null);
       setLoadError(null);
       return;
     }
-    void refetch();
-    const t = setInterval(() => void refetch(), 1000);
-    return () => clearInterval(t);
-  }, [refetch, anyPaneId]);
+    try {
+      const res = await paneLayout(anyPaneId);
+      // Mid-drag (once the preview moved) the DOM transform is the truth;
+      // applying a fetched layout would fight it. Drag-end refetches anyway.
+      if (dragState.current?.moved) return;
+      layoutRef.current = res.layout ?? null;
+      setLayout(res.layout ?? null);
+      setLoadError(null);
+    } catch (err: any) {
+      if (!dragState.current?.moved) setLoadError(String(err?.message ?? err));
+    }
+  }, [anyPaneId]);
 
-  // Cells show raw output per pane; make sure each has fresh text.
+  // (c) fetch on mount / pane-set change and after every snapshot refresh —
+  // herdr `layout.updated` (and pane/tab state events) arrive through
+  // scheduleSnapshotRefresh, so this covers all PRD-required triggers.
   useEffect(() => {
-    for (const p of panes) void refreshPaneOutput(p.pane_id);
-    // panes is derived per render; depend only on the id list
-  }, [panes.map((p) => p.pane_id).join(","), refreshPaneOutput]);
+    void refetch();
+  }, [refetch, snapshot]);
 
-  const entries: PaneLayoutEntry[] = layout?.panes ?? [];
-  const area: PaneRect | undefined = layout?.area;
+  // Make sure each cell has text to show.
+  useEffect(() => {
+    for (const id of paneIds.split(",")) if (id) void refreshPaneOutput(id);
+  }, [paneIds, refreshPaneOutput]);
 
-  const pct = (v: number, total: number) => `${(v / total) * 100}%`;
+  // Default selection = focused pane (the store keeps activePaneId on the
+  // focused pane; recover if the tab somehow has no selection).
+  useEffect(() => {
+    if (!activePaneId && paneIds) selectPane(paneIds.split(",")[0]);
+  }, [activePaneId, paneIds, selectPane]);
 
   const dragState = useRef<{
     splitId: string;
     startX: number;
     startY: number;
-    direction: string;
+    isVertical: boolean;
+    movingIds: string[];
+    splitterEl: HTMLDivElement | null;
+    moved: boolean;
+    /** Last CLAMPED displacement — committed on mouse-up (review #2). */
+    lastDx: number;
+    lastDy: number;
   } | null>(null);
-  // nit: detach the window mouseup listener if we unmount mid-drag.
+  // nit: detach the window listeners if we unmount mid-drag.
   const dragCleanupRef = useRef<(() => void) | null>(null);
   useEffect(
     () => () => {
@@ -475,34 +683,106 @@ function Mosaic() {
     [],
   );
 
+  /** Clamp the preview shift so the divider stays within the mosaic area. */
+  const clampPreview = (d: number, split: NonNullable<PaneLayout["splits"]>[number], area: PaneRect) => {
+    const wrap = wrapRef.current;
+    if (!wrap) return d;
+    const box = wrap.getBoundingClientRect();
+    if (dragState.current?.isVertical) {
+      const dividerPx = ((split.rect.x - area.x + split.rect.width * split.ratio) / area.width) * box.width;
+      const min = box.width * 0.08 - dividerPx;
+      const max = box.width * 0.92 - dividerPx;
+      return Math.min(max, Math.max(min, d));
+    }
+    const dividerPx = ((split.rect.y - area.y + split.rect.height * split.ratio) / area.height) * box.height;
+    const min = box.height * 0.08 - dividerPx;
+    const max = box.height * 0.92 - dividerPx;
+    return Math.min(max, Math.max(min, d));
+  };
+
   const beginDrag = (split: NonNullable<PaneLayout["splits"]>[number]) => (e: ReactMouseEvent) => {
     e.preventDefault();
+    const lay = layoutRef.current;
+    if (!lay || !lay.area) return;
+    // (c) pull a fresh snapshot around the drag window (before the preview moves).
+    void refetch();
+    const isVertical = split.direction === "right"; // vertical divider between left|right
+    const movingIds = lay.panes
+      .filter((p) =>
+        isVertical
+          ? p.rect.x >= split.rect.x + split.rect.width - 1
+          : p.rect.y >= split.rect.y + split.rect.height - 1,
+      )
+      .map((p) => p.pane_id);
     dragState.current = {
       splitId: split.id,
       startX: e.clientX,
       startY: e.clientY,
-      direction: split.direction,
+      isVertical,
+      movingIds,
+      splitterEl: splitterRefs.current.get(split.id) ?? null,
+      moved: false,
+      lastDx: 0,
+      lastDy: 0,
     };
-    const onUp = (ev: MouseEvent) => {
+    document.body.classList.add("mosaic-dragging");
+
+    // (d) live preview: write transforms straight to the DOM — no React
+    // re-render, no layout RPC per mousemove.
+    const onMove = (ev: MouseEvent) => {
+      const st = dragState.current;
+      if (!st || !lay.area) return;
+      const raw = st.isVertical ? ev.clientX - st.startX : ev.clientY - st.startY;
+      const d = clampPreview(raw, split, lay.area);
+      if (Math.abs(d) > 2) st.moved = true;
+      // Record the clamped value: this is what the preview shows AND what the
+      // commit submits on release.
+      if (st.isVertical) {
+        st.lastDx = d;
+        st.lastDy = 0;
+      } else {
+        st.lastDx = 0;
+        st.lastDy = d;
+      }
+      const t = st.isVertical ? `translate3d(${d}px,0,0)` : `translate3d(0,${d}px,0)`;
+      for (const id of st.movingIds) cellRefs.current.get(id)?.style.setProperty("transform", t);
+      st.splitterEl?.style.setProperty("transform", t);
+    };
+
+    const onUp = () => {
       dragCleanupRef.current?.();
       dragCleanupRef.current = null;
       const st = dragState.current;
       dragState.current = null;
+      document.body.classList.remove("mosaic-dragging");
       if (!st) return;
-      const dx = ev.clientX - st.startX;
-      const dy = ev.clientY - st.startY;
-      void commitResize(st.splitId, st.direction, dx, dy);
+      // Clear the local preview; the committed layout takes over.
+      for (const id of st.movingIds) cellRefs.current.get(id)?.style.removeProperty("transform");
+      st.splitterEl?.style.removeProperty("transform");
+      // Commit the CLAMPED preview displacement, not the raw mouse travel.
+      void commitResize(st.splitId, st.isVertical ? "right" : "down", st.lastDx, st.lastDy);
     };
+
+    window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
-    dragCleanupRef.current = () => window.removeEventListener("mouseup", onUp);
+    dragCleanupRef.current = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.classList.remove("mosaic-dragging");
+    };
   };
 
   const commitResize = async (splitId: string, direction: string, dx: number, dy: number) => {
-    const split = layout?.splits?.find((s) => s.id === splitId);
-    if (!split || !layout) return;
+    const lay = layoutRef.current;
+    const split = lay?.splits?.find((s) => s.id === splitId);
+    if (!split || !lay) return;
     const isVertical = direction === "right"; // vertical divider between left|right
     const deltaPx = isVertical ? dx : dy;
-    if (Math.abs(deltaPx) < 4) return;
+    if (Math.abs(deltaPx) < 4) {
+      // Below threshold: re-sync (drag-end is a PRD fetch trigger anyway).
+      void refetch();
+      return;
+    }
     const wrap = wrapRef.current;
     if (!wrap) return;
     const box = wrap.getBoundingClientRect();
@@ -510,7 +790,7 @@ function Mosaic() {
     const amount = Math.min(0.9, Math.abs(deltaPx / totalPx));
     const dir = isVertical ? (deltaPx > 0 ? "right" : "left") : deltaPx > 0 ? "down" : "up";
     // Any pane inside the split's rect identifies the split to herdr.
-    const paneInSplit = layout.panes.find(
+    const paneInSplit = lay.panes.find(
       (p) =>
         p.rect.x >= split.rect.x &&
         p.rect.y >= split.rect.y &&
@@ -520,12 +800,29 @@ function Mosaic() {
     if (!paneInSplit) return;
     try {
       const res = await paneResize(paneInSplit.pane_id, dir, amount);
-      if (res?.resize?.layout) setLayout(res.resize.layout);
-      else void refetch();
+      const next = res?.resize?.layout;
+      if (next) {
+        layoutRef.current = next;
+        setLayout(next);
+      } else {
+        void refetch(); // (c) drag-end refetch
+      }
     } catch {
-      /* resize refused — next poll refreshes the snapshot anyway */
+      /* resize refused — the drag-end refetch refreshes the snapshot anyway */
+      void refetch();
     }
   };
+
+  const onSelectCell = useCallback((id: string) => selectPane(id), [selectPane]);
+
+  // Stable identities so the memoized cells only re-render for real prop changes.
+  const registerCellRef = useCallback((id: string, el: HTMLDivElement | null) => {
+    if (el) cellRefs.current.set(id, el);
+    else cellRefs.current.delete(id);
+  }, []);
+
+  const entries: PaneLayoutEntry[] = layout?.panes ?? [];
+  const area: PaneRect | undefined = layout?.area;
 
   return (
     <div className="mosaic-wrap">
@@ -533,42 +830,21 @@ function Mosaic() {
         {!layout && !loadError && <div className="rs-hint">正在读取布局…</div>}
         {loadError && <div className="rs-hint">读取布局失败：{loadError}</div>}
         {layout &&
-          entries.map((entry) => {
-            const out = outputs[entry.pane_id];
-            const agent = agents.find((a) => a.pane_id === entry.pane_id);
-            const shortId = entry.pane_id.split(":p")[1] ?? "";
-            const key = entry.pane_id;
-            const style: CSSProperties = area
-              ? {
-                  left: pct(entry.rect.x - area.x, area.width),
-                  top: pct(entry.rect.y - area.y, area.height),
-                  width: pct(entry.rect.width, area.width),
-                  height: pct(entry.rect.height, area.height),
-                }
-              : {};
-            return (
-              <div key={key} className="mosaic-cell" data-testid={`mosaic-pane-${entry.pane_id}`} style={style}>
-                <div className="mosaic-cell-head">
-                  {agent ? (
-                    <span className={`sdot ${agent.agent_status}`} />
-                  ) : (
-                    <IconTerminal size={11} />
-                  )}
-                  <span>{agent ? agentDisplayName(agent) : `shell ${shortId}`}</span>
-                </div>
-                <div className="mosaic-cell-body">
-                  {out?.text ? <AnsiView text={out.text} /> : (
-                    <div className="rs-hint" style={{ padding: "6px 10px" }}>
-                      {out?.loading ? "正在读取输出…" : "暂无输出"}
-                    </div>
-                  )}
-                </div>
-              </div>
-            );
-          })}
+          area &&
+          entries.map((entry) => (
+            <MosaicCell
+              key={entry.pane_id}
+              paneId={entry.pane_id}
+              rect={entry.rect}
+              area={area}
+              selected={entry.pane_id === activePaneId}
+              onSelect={onSelectCell}
+              registerRef={registerCellRef}
+            />
+          ))}
         {layout &&
+          area &&
           (layout.splits ?? []).map((split) => {
-            if (!area) return null;
             const isVertical = split.direction === "right";
             const style: CSSProperties = isVertical
               ? {
@@ -590,6 +866,10 @@ function Mosaic() {
                 data-testid={`splitter-${split.id}`}
                 style={style}
                 onMouseDown={beginDrag(split)}
+                ref={(el) => {
+                  if (el) splitterRefs.current.set(split.id, el);
+                  else splitterRefs.current.delete(split.id);
+                }}
                 title="拖动调整布局"
               />
             );
@@ -599,8 +879,79 @@ function Mosaic() {
   );
 }
 
+function pct(v: number, total: number) {
+  return `${(v / total) * 100}%`;
+}
+
+/**
+ * One mosaic cell. Memo + per-cell store subscriptions: a text update on pane X
+ * only re-renders pane X's cell (the parent never subscribes to `outputs`).
+ */
+const MosaicCell = memo(function MosaicCell({
+  paneId,
+  rect,
+  area,
+  selected,
+  onSelect,
+  registerRef,
+}: {
+  paneId: string;
+  rect: PaneRect;
+  area: PaneRect;
+  selected: boolean;
+  onSelect: (paneId: string) => void;
+  registerRef: (id: string, el: HTMLDivElement | null) => void;
+}) {
+  const output = useStore((s) => s.outputs[paneId]); // (a) own slice only
+  const agent = useStore((s) => s.agents.find((a) => a.pane_id === paneId));
+  const shortId = paneId.split(":p")[1] ?? "";
+  const style = useMemo<CSSProperties>(
+    () => ({
+      left: pct(rect.x - area.x, area.width),
+      top: pct(rect.y - area.y, area.height),
+      width: pct(rect.width, area.width),
+      height: pct(rect.height, area.height),
+    }),
+    [rect.x, rect.y, rect.width, rect.height, area.x, area.y, area.width, area.height],
+  );
+  return (
+    <div
+      ref={(el) => registerRef(paneId, el)}
+      className={`mosaic-cell${selected ? " mosaic-pane-selected" : ""}`}
+      data-testid={`mosaic-pane-${paneId}`}
+      data-selected={selected ? "true" : "false"}
+      style={style}
+      onClick={() => onSelect(paneId)}
+      title={selected ? "输入目标（点击切换）" : "点击设为输入目标"}
+    >
+      <div className="mosaic-cell-head">
+        {agent ? (
+          <span className={`sdot ${agent.agent_status}`} />
+        ) : (
+          <IconTerminal size={11} />
+        )}
+        <span>{agent ? agentDisplayName(agent) : `shell ${shortId}`}</span>
+      </div>
+      <div className="mosaic-cell-body">
+        {output?.text ? (
+          <AnsiView text={output.text} paneId={paneId} />
+        ) : (
+          <div className="rs-hint" style={{ padding: "6px 10px" }}>
+            {output?.loading ? "正在读取输出…" : "暂无输出"}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+});
+
 function Composer() {
+  const layoutMode = useStore((s) => s.layoutMode);
   const paneId = useStore((s) => s.activePaneId);
+  const panes = useStore((s) => s.panes);
+  const agents = useStore((s) => s.agents);
+  const activeTabId = useStore((s) => s.activeTabId);
+  const selectPane = useStore((s) => s.selectPane);
   const pane = useStore((s) => s.panes.find((p) => p.pane_id === s.activePaneId) ?? null);
   const agent = useStore((s) => agentForPane(s.agents, s.activePaneId));
   const status = useStore((s) => s.status);
@@ -610,6 +961,19 @@ function Composer() {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
+
+  // F3 input-target dropdown options (unified mode only). `paneId` doubles as
+  // the selected target so the dropdown and cell clicks stay in sync.
+  const targetOptions = useMemo(() => {
+    if (layoutMode !== "unified") return [];
+    return panes
+      .filter((p) => p.tab_id === activeTabId)
+      .map((p) => {
+        const a = agents.find((x) => x.pane_id === p.pane_id);
+        const shortId = p.pane_id.split(":p")[1] ?? "";
+        return { paneId: p.pane_id, label: a ? agentDisplayName(a) : `shell ${shortId}` };
+      });
+  }, [layoutMode, panes, agents, activeTabId]);
 
   const canSend = paneId !== null && text.trim().length > 0 && !sending && status !== "no-server";
 
@@ -672,14 +1036,26 @@ function Composer() {
           rows={2}
         />
         <div className="composer-row">
+          {layoutMode === "unified" && targetOptions.length > 0 && (
+            <select
+              className="composer-target"
+              data-testid="input-target"
+              value={paneId ?? ""}
+              onChange={(e) => selectPane(e.target.value)}
+              disabled={!paneId || status === "no-server"}
+              title="输入发送到哪个窗格"
+            >
+              {targetOptions.map((o) => (
+                <option key={o.paneId} value={o.paneId}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          )}
           <button className="hint-key" onClick={() => void interrupt(["esc"])} disabled={!paneId}>
             Esc 中断
           </button>
-          <button
-            className="hint-key"
-            onClick={() => void interrupt(["ctrl+c"])}
-            disabled={!paneId}
-          >
+          <button className="hint-key" onClick={() => void interrupt(["ctrl+c"])} disabled={!paneId}>
             Ctrl+C
           </button>
           <button className="send-btn" onClick={() => void send()} disabled={!canSend}>
