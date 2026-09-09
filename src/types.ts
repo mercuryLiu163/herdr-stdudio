@@ -80,6 +80,44 @@ export interface PushEvent {
 
 export type ConnStatus = "connecting" | "connected" | "reconnecting" | "no-server";
 
+/** F2: a node of the local file tree shown in the right sidebar. */
+export interface FsNode {
+  name: string;
+  path: string;
+  type: "dir" | "file";
+  children?: FsNode[];
+}
+
+/** F2: result of reading a file for preview. */
+export type FilePreview =
+  | { kind: "text"; data: string; path: string }
+  | { kind: "image"; data: string; path: string }
+  | { kind: "other"; data: string; path: string };
+
+/** F3: one pane's rectangle from the herdr layout snapshot (character cells). */
+export interface PaneRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface PaneLayoutEntry {
+  pane_id: string;
+  focused: boolean;
+  rect: PaneRect;
+}
+
+export interface PaneLayout {
+  workspace_id: string;
+  tab_id: string;
+  zoomed: boolean;
+  area: PaneRect;
+  focused_pane_id: string | null;
+  panes: PaneLayoutEntry[];
+  splits?: Array<{ id: string; direction: string; ratio: number; rect: PaneRect }>;
+}
+
 declare global {
   interface Window {
     herdr: {
@@ -89,11 +127,14 @@ declare global {
         timeoutMs?: number,
       ) => Promise<{ type: string } & Record<string, unknown>>;
       setGlobalSubs: (subs: unknown[]) => Promise<void>;
-      setPaneStream: (paneId: string | null) => Promise<void>;
+      setPaneStream: (panes: string | string[] | null) => Promise<void>;
       socketInfo: () => Promise<{ pointer: string; target: string }>;
       notify: (title: string, body: string) => Promise<void>;
       launchServer: () => Promise<void>;
       win: (action: "min" | "max" | "close") => Promise<void>;
+      fsTree: (dir: string, depth?: number) => Promise<FsNode[] | { error: string }>;
+      fsRead: (path: string) => Promise<FilePreview>;
+      fsOpen: (path: string) => Promise<string>;
       onEvent: (cb: (ev: PushEvent) => void) => () => void;
       onStatus: (cb: (status: ConnStatus) => void) => () => void;
       onResync: (cb: () => void) => () => void;

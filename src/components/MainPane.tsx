@@ -1,8 +1,12 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties, MouseEvent as ReactMouseEvent } from "react";
 import { useStore, agentForPane, agentDisplayName } from "../store";
 import { AnsiView } from "../ansi";
+import { parseTranscript } from "../chat-parser";
+import type { PaneLayout, PaneLayoutEntry, PaneRect } from "../types";
+import { paneLayout, paneResize, agentPrompt, paneSendText, paneSendKeys, agentSendKeys } from "../api";
 import { IconBook, IconSend, IconTerminal } from "./icons";
-import { agentPrompt, paneSendText, paneSendKeys, agentSendKeys } from "../api";
+import { IconColumns, IconMosaic } from "./icons";
 
 const statusLabel: Record<string, string> = {
   working: "工作中",
@@ -27,6 +31,8 @@ function relativeTime(ts: number): string {
   return `${Math.floor(d / 3_600_000)} 小时前`;
 }
 
+type ViewMode = "chat" | "raw";
+
 export function MainPane() {
   const activeTabId = useStore((s) => s.activeTabId);
   const activePaneId = useStore((s) => s.activePaneId);
@@ -37,7 +43,16 @@ export function MainPane() {
   const agent = useStore((s) => agentForPane(s.agents, s.activePaneId));
   const selectPane = useStore((s) => s.selectPane);
   const status = useStore((s) => s.status);
-  const [view, setView] = useState<"read" | "term">("read");
+  const layoutMode = useStore((s) => s.layoutMode);
+  const setLayoutMode = useStore((s) => s.setLayoutMode);
+  const [view, setView] = useState<ViewMode>("raw");
+
+  // F4: agent panes default to the chat view, shell panes to raw output.
+  // Re-apply when the pane changes or when an agent appears/disappears on it.
+  const isAgent = !!agent;
+  useEffect(() => {
+    setView(isAgent ? "chat" : "raw");
+  }, [activePaneId, isAgent]);
 
   if (!tab) {
     return (
@@ -74,20 +89,63 @@ export function MainPane() {
               {pane?.cwd && (
                 <>
                   <span>·</span>
-                  <span style={{ fontFamily: "var(--font-mono)", fontSize: 11 }}>
+                  <span
+                    style={{
+                      fontFamily: "var(--font-mono)",
+                      fontSize: 11,
+                      maxWidth: "100%",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                    }}
+                  >
                     {pane.cwd}
                   </span>
                 </>
               )}
             </div>
           </div>
-          <div className="seg" style={{ flexShrink: 0 }}>
-            <button className={view === "read" ? "on" : ""} onClick={() => setView("read")}>
-              阅读
-            </button>
-            <button title="V2 将内嵌 xterm.js 终端" disabled>
-              终端 · V2
-            </button>
+          <div className="header-segs" style={{ flexShrink: 0 }}>
+            <div className="seg" data-testid="layout-mode" title="终端区布局">
+              <button
+                data-testid="layout-separate"
+                aria-pressed={layoutMode === "separate"}
+                className={layoutMode === "separate" ? "on" : ""}
+                onClick={() => setLayoutMode("separate")}
+              >
+                <IconColumns /> 分屏
+              </button>
+              <button
+                data-testid="layout-unified"
+                aria-pressed={layoutMode === "unified"}
+                className={layoutMode === "unified" ? "on" : ""}
+                onClick={() => setLayoutMode("unified")}
+              >
+                <IconMosaic /> 统一
+              </button>
+            </div>
+            {layoutMode === "separate" && (
+              <div className="seg">
+                <button
+                  data-testid="view-chat"
+                  aria-pressed={view === "chat"}
+                  className={view === "chat" ? "on" : ""}
+                  onClick={() => setView("chat")}
+                >
+                  对话
+                </button>
+                <button
+                  data-testid="view-raw"
+                  aria-pressed={view === "raw"}
+                  className={view === "raw" ? "on" : ""}
+                  onClick={() => setView("raw")}
+                >
+                  原始输出
+                </button>
+                <button title="V2 将内嵌 xterm.js 终端" disabled>
+                  终端 · V2
+                </button>
+              </div>
+            )}
           </div>
         </div>
         {panes.length > 0 && (
@@ -118,7 +176,13 @@ export function MainPane() {
           </div>
         )}
       </div>
-      {view === "read" ? <OutputReader /> : null}
+      {layoutMode === "unified" ? (
+        <Mosaic />
+      ) : view === "chat" ? (
+        <ChatView />
+      ) : (
+        <OutputReader />
+      )}
       <Composer />
     </div>
   );
@@ -171,32 +235,8 @@ function OutputReader() {
         setShowJump(!atBottom);
       }}
     >
-      <div className="reader-card">
-        <div className="reader-meta">
-          {agent ? (
-            <>
-              <span className={`sdot ${agent.agent_status}`} />
-              <span>
-                {agentDisplayName(agent)} · {statusLabel[agent.agent_status] ?? agent.agent_status}
-              </span>
-            </>
-          ) : (
-            <>
-              <IconTerminal size={13} />
-              <span>终端输出 · recent-unwrapped</span>
-            </>
-          )}
-          <span style={{ marginLeft: "auto" }}>
-            {output?.updatedAt ? `更新于 ${relativeTime(output.updatedAt)}` : ""}
-          </span>
-          <button
-            className="hint-key"
-            onClick={() => paneId && void refresh(paneId)}
-            title="手动刷新"
-          >
-            刷新
-          </button>
-        </div>
+      <div className="reader-card" data-testid="reader-card">
+        <ReaderMeta agent={agent} output={output} paneId={paneId} refresh={refresh} />
         {output?.failed ? (
           <div style={{ color: "var(--text-faint)", padding: "8px 0" }}>
             读取输出失败。窗格可能刚刚关闭，或处于 alternate screen（如 vim / htop）。
@@ -224,6 +264,337 @@ function OutputReader() {
           回到底部 ↓
         </button>
       )}
+    </div>
+  );
+}
+
+function ReaderMeta({
+  agent,
+  output,
+  paneId,
+  refresh,
+}: {
+  agent: ReturnType<typeof agentForPane>;
+  output?: { updatedAt: number };
+  paneId: string;
+  refresh: (paneId: string) => Promise<void>;
+}) {
+  return (
+    <div className="reader-meta">
+      {agent ? (
+        <>
+          <span className={`sdot ${agent.agent_status}`} />
+          <span>
+            {agentDisplayName(agent)} · {statusLabel[agent.agent_status] ?? agent.agent_status}
+          </span>
+        </>
+      ) : (
+        <>
+          <IconTerminal size={13} />
+          <span>终端输出 · recent-unwrapped</span>
+        </>
+      )}
+      <span style={{ marginLeft: "auto" }}>
+        {output?.updatedAt ? `更新于 ${relativeTime(output.updatedAt)}` : ""}
+      </span>
+      <button
+        className="hint-key"
+        onClick={() => paneId && void refresh(paneId)}
+        title="手动刷新"
+      >
+        刷新
+      </button>
+    </div>
+  );
+}
+
+/** F4 chat view: the pane transcript parsed into a conversation thread. */
+function ChatView() {
+  const paneId = useStore((s) => s.activePaneId);
+  const output = useStore((s) => (s.activePaneId ? s.outputs[s.activePaneId] : undefined));
+  const agents = useStore((s) => s.agents);
+  const refresh = useStore((s) => s.refreshPaneOutput);
+  const status = useStore((s) => s.status);
+  const agent = agentForPane(agents, paneId);
+
+  if (!paneId) {
+    return (
+      <div className="empty">
+        <div className="glyph">
+          <IconBook />
+        </div>
+        <h2>这个标签里没有窗格</h2>
+        <p>在 herdr 里为该标签创建窗格后，这里会显示它的输出。</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="reader-wrap">
+      <div className="reader-card chat-card" data-testid="reader-card">
+        <ReaderMeta agent={agent} output={output} paneId={paneId} refresh={refresh} />
+        {output?.failed && !output?.text ? (
+          <div className="chat-thread" data-testid="chat-thread">
+            <div className="chat-empty">读取输出失败。窗格可能刚刚关闭，或处于 alternate screen。</div>
+          </div>
+        ) : output?.text ? (
+          <ChatThread text={output.text} />
+        ) : output?.loading || status !== "connected" ? (
+          <div className="chat-thread" data-testid="chat-thread">
+            <div className="chat-empty">正在读取输出…</div>
+          </div>
+        ) : (
+          <div className="chat-thread" data-testid="chat-thread">
+            <div className="chat-empty">暂无对话。向这个 agent 发送一条 prompt 试试。</div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function firstLine(text: string): string {
+  const line = text.split("\n", 1)[0] ?? "";
+  return line.length > 160 ? line.slice(0, 159) + "…" : line;
+}
+
+function ChatThread({ text }: { text: string }) {
+  const blocks = useMemo(() => parseTranscript(text), [text]);
+  return (
+    <div className="chat-thread" data-testid="chat-thread">
+      {blocks.length === 0 && <div className="chat-empty">暂无对话内容。</div>}
+      {blocks.map((b, i) => {
+        switch (b.type) {
+          case "user":
+            return (
+              <div key={i} className="chat-msg user" data-testid="msg-user">
+                <div className="chat-bubble">{b.text}</div>
+              </div>
+            );
+          case "assistant":
+            return (
+              <div key={i} className="chat-msg assistant" data-testid="msg-assistant">
+                {b.text}
+              </div>
+            );
+          case "tool":
+            return (
+              <details key={i} className="chat-msg tool" data-testid="msg-tool">
+                <summary>
+                  <span className="chat-tool-tag">tool</span>
+                  {firstLine(b.text)}
+                </summary>
+                <pre>{b.text}</pre>
+              </details>
+            );
+          case "code":
+            return (
+              <pre key={i} className="chat-msg code" data-testid="msg-code">
+                {b.text}
+              </pre>
+            );
+          case "meta":
+            return (
+              <div key={i} className="chat-meta" data-testid="msg-meta">
+                {b.text}
+              </div>
+            );
+          default:
+            return null;
+        }
+      })}
+    </div>
+  );
+}
+
+/**
+ * F3 unified layout: every pane of the active tab positioned by the herdr
+ * `pane.layout` rect snapshot (percentages of the tab area), draggable
+ * splitters between cells that call `pane.resize` and re-snapshot.
+ */
+function Mosaic() {
+  const panes = useStore((s) => s.panes.filter((p) => p.tab_id === s.activeTabId));
+  const activeTabId = useStore((s) => s.activeTabId);
+  const outputs = useStore((s) => s.outputs);
+  const refreshPaneOutput = useStore((s) => s.refreshPaneOutput);
+  const agents = useStore((s) => s.agents);
+  const [layout, setLayout] = useState<PaneLayout | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  const anyPaneId = panes[0]?.pane_id ?? null;
+
+  const refetch = useCallback(async () => {
+    if (!anyPaneId) return;
+    try {
+      const res = await paneLayout(anyPaneId);
+      setLayout(res.layout ?? null);
+      setLoadError(null);
+    } catch (err: any) {
+      setLoadError(String(err?.message ?? err));
+    }
+  }, [anyPaneId]);
+
+  // 1s layout snapshot polling while in unified mode (PRD), plus first fetch.
+  // With no panes left in the tab: drop the stale snapshot and stop the timer.
+  useEffect(() => {
+    if (!anyPaneId) {
+      setLayout(null);
+      setLoadError(null);
+      return;
+    }
+    void refetch();
+    const t = setInterval(() => void refetch(), 1000);
+    return () => clearInterval(t);
+  }, [refetch, anyPaneId]);
+
+  // Cells show raw output per pane; make sure each has fresh text.
+  useEffect(() => {
+    for (const p of panes) void refreshPaneOutput(p.pane_id);
+    // panes is derived per render; depend only on the id list
+  }, [panes.map((p) => p.pane_id).join(","), refreshPaneOutput]);
+
+  const entries: PaneLayoutEntry[] = layout?.panes ?? [];
+  const area: PaneRect | undefined = layout?.area;
+
+  const pct = (v: number, total: number) => `${(v / total) * 100}%`;
+
+  const dragState = useRef<{
+    splitId: string;
+    startX: number;
+    startY: number;
+    direction: string;
+  } | null>(null);
+  // nit: detach the window mouseup listener if we unmount mid-drag.
+  const dragCleanupRef = useRef<(() => void) | null>(null);
+  useEffect(
+    () => () => {
+      dragCleanupRef.current?.();
+      dragCleanupRef.current = null;
+    },
+    [],
+  );
+
+  const beginDrag = (split: NonNullable<PaneLayout["splits"]>[number]) => (e: ReactMouseEvent) => {
+    e.preventDefault();
+    dragState.current = {
+      splitId: split.id,
+      startX: e.clientX,
+      startY: e.clientY,
+      direction: split.direction,
+    };
+    const onUp = (ev: MouseEvent) => {
+      dragCleanupRef.current?.();
+      dragCleanupRef.current = null;
+      const st = dragState.current;
+      dragState.current = null;
+      if (!st) return;
+      const dx = ev.clientX - st.startX;
+      const dy = ev.clientY - st.startY;
+      void commitResize(st.splitId, st.direction, dx, dy);
+    };
+    window.addEventListener("mouseup", onUp);
+    dragCleanupRef.current = () => window.removeEventListener("mouseup", onUp);
+  };
+
+  const commitResize = async (splitId: string, direction: string, dx: number, dy: number) => {
+    const split = layout?.splits?.find((s) => s.id === splitId);
+    if (!split || !layout) return;
+    const isVertical = direction === "right"; // vertical divider between left|right
+    const deltaPx = isVertical ? dx : dy;
+    if (Math.abs(deltaPx) < 4) return;
+    const wrap = wrapRef.current;
+    if (!wrap) return;
+    const box = wrap.getBoundingClientRect();
+    const totalPx = isVertical ? box.width : box.height;
+    const amount = Math.min(0.9, Math.abs(deltaPx / totalPx));
+    const dir = isVertical ? (deltaPx > 0 ? "right" : "left") : deltaPx > 0 ? "down" : "up";
+    // Any pane inside the split's rect identifies the split to herdr.
+    const paneInSplit = layout.panes.find(
+      (p) =>
+        p.rect.x >= split.rect.x &&
+        p.rect.y >= split.rect.y &&
+        p.rect.x + p.rect.width <= split.rect.x + split.rect.width + 1 &&
+        p.rect.y + p.rect.height <= split.rect.y + split.rect.height + 1,
+    );
+    if (!paneInSplit) return;
+    try {
+      const res = await paneResize(paneInSplit.pane_id, dir, amount);
+      if (res?.resize?.layout) setLayout(res.resize.layout);
+      else void refetch();
+    } catch {
+      /* resize refused — next poll refreshes the snapshot anyway */
+    }
+  };
+
+  return (
+    <div className="mosaic-wrap">
+      <div className="mosaic" data-testid="mosaic" ref={wrapRef}>
+        {!layout && !loadError && <div className="rs-hint">正在读取布局…</div>}
+        {loadError && <div className="rs-hint">读取布局失败：{loadError}</div>}
+        {layout &&
+          entries.map((entry) => {
+            const out = outputs[entry.pane_id];
+            const agent = agents.find((a) => a.pane_id === entry.pane_id);
+            const shortId = entry.pane_id.split(":p")[1] ?? "";
+            const key = entry.pane_id;
+            const style: CSSProperties = area
+              ? {
+                  left: pct(entry.rect.x - area.x, area.width),
+                  top: pct(entry.rect.y - area.y, area.height),
+                  width: pct(entry.rect.width, area.width),
+                  height: pct(entry.rect.height, area.height),
+                }
+              : {};
+            return (
+              <div key={key} className="mosaic-cell" data-testid={`mosaic-pane-${entry.pane_id}`} style={style}>
+                <div className="mosaic-cell-head">
+                  {agent ? (
+                    <span className={`sdot ${agent.agent_status}`} />
+                  ) : (
+                    <IconTerminal size={11} />
+                  )}
+                  <span>{agent ? agentDisplayName(agent) : `shell ${shortId}`}</span>
+                </div>
+                <div className="mosaic-cell-body">
+                  {out?.text ? <AnsiView text={out.text} /> : (
+                    <div className="rs-hint" style={{ padding: "6px 10px" }}>
+                      {out?.loading ? "正在读取输出…" : "暂无输出"}
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        {layout &&
+          (layout.splits ?? []).map((split) => {
+            if (!area) return null;
+            const isVertical = split.direction === "right";
+            const style: CSSProperties = isVertical
+              ? {
+                  left: `calc(${pct(split.rect.x - area.x + split.rect.width * split.ratio, area.width)} - 5px)`,
+                  top: pct(split.rect.y - area.y, area.height),
+                  width: 10,
+                  height: pct(split.rect.height, area.height),
+                }
+              : {
+                  left: pct(split.rect.x - area.x, area.width),
+                  top: `calc(${pct(split.rect.y - area.y + split.rect.height * split.ratio, area.height)} - 5px)`,
+                  width: pct(split.rect.width, area.width),
+                  height: 10,
+                };
+            return (
+              <div
+                key={split.id}
+                className={`splitter ${isVertical ? "v" : "h"}`}
+                data-testid={`splitter-${split.id}`}
+                style={style}
+                onMouseDown={beginDrag(split)}
+                title="拖动调整布局"
+              />
+            );
+          })}
+      </div>
     </div>
   );
 }

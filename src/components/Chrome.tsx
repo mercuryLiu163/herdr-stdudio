@@ -1,5 +1,6 @@
 import { useStore } from "../store";
-import { IconClose, IconGear, IconMaximize, IconMinimize } from "./icons";
+import { toggleTheme } from "../theme";
+import { IconClose, IconGear, IconMaximize, IconMinimize, IconMoon, IconPanelRight, IconSun } from "./icons";
 
 const statusLabel: Record<string, string> = {
   connected: "已连接",
@@ -10,6 +11,8 @@ const statusLabel: Record<string, string> = {
 
 export function TitleBar() {
   const status = useStore((s) => s.status);
+  const rightSidebarOpen = useStore((s) => s.rightSidebarOpen);
+  const toggleRightSidebar = useStore((s) => s.toggleRightSidebar);
   const dot = status === "connected" ? "ok" : status === "no-server" ? "bad" : "warn";
   return (
     <div className="titlebar">
@@ -20,6 +23,25 @@ export function TitleBar() {
         <span className={`conn-dot ${dot}`} />
         {statusLabel[status] ?? status}
       </span>
+      <div className="titlebar-actions">
+        <button
+          className="titlebar-btn"
+          data-testid="theme-toggle"
+          onClick={() => toggleTheme()}
+          title="切换日夜主题"
+        >
+          <IconSun className="icon-sun" />
+          <IconMoon className="icon-moon" />
+        </button>
+        <button
+          className={`titlebar-btn ${rightSidebarOpen ? "on" : ""}`}
+          data-testid="right-sidebar-toggle"
+          onClick={() => toggleRightSidebar()}
+          title="功能栏"
+        >
+          <IconPanelRight />
+        </button>
+      </div>
       <div className="win-controls">
         <button className="win-btn" onClick={() => window.herdr.win("min")} title="最小化">
           <IconMinimize />

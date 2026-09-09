@@ -1,0 +1,9 @@
+feat(v2): 日夜主题 / 右侧功能栏 / 终端双模式 / 对话视图
+
+F1 日夜模式：html[data-theme] 令牌组切换（dark=Claude 风 / light=ChatGPT Desktop 风），localStorage 持久化
+F2 右侧功能栏：文件树（cwd 跟随、深度3）+ md/图片/文本预览 + 默认浏览器打开；fs:tree/read/open IPC；marked 渲染前转义 + 导航防护（协议白名单 + setWindowOpenHandler/will-navigate）
+F3 终端双模式：分屏（V1 行为）/ 统一（pane.layout rect 马赛克 + pane.resize 拖拽调真实布局，实测 amount 为 ratio 增量）
+F4 对话视图：chat-parser 纯函数解析（strip ANSI - 丢 TUI 装饰 - marker 分类），user 气泡/tool 卡片/assistant 正文/code 块，agent pane 默认开启
+
+测试：Playwright 13/13、V1 回归（协议 12 + e2e 25 + 冒烟 1）ALL GREEN、typecheck 通过
+评审：APPROVE-WITH-NITPICKS 全项修复；judge 视觉验收 PASS

@@ -1,5 +1,6 @@
-import { app, BrowserWindow, ipcMain, Notification } from "electron";
+import { app, BrowserWindow, ipcMain, Notification, shell } from "electron";
 import * as path from "node:path";
+import * as fs from "node:fs";
 import {
   HerdrClient,
   Subscription,
@@ -10,13 +11,44 @@ import {
 
 const client = new HerdrClient();
 
+// E2E isolation: test launches point HERDR_STUDIO_SOCKET at a throwaway
+// session; give them a throwaway userData dir too so localStorage (theme,
+// layout mode) starts from defaults on every launch instead of leaking
+// between runs.
+if (process.env.HERDR_STUDIO_SOCKET) {
+  try {
+    const tmp = app.getPath("temp");
+    // Startup sweep: drop throwaway userData dirs left by runs older than 24h.
+    // Never touches a dir still in use by a live instance (mtime is fresh).
+    try {
+      const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+      for (const name of fs.readdirSync(tmp)) {
+        if (!name.startsWith("herdr-studio-e2e-")) continue;
+        const full = path.join(tmp, name);
+        try {
+          if (fs.statSync(full).mtimeMs < cutoff) {
+            fs.rmSync(full, { recursive: true, force: true });
+          }
+        } catch {
+          /* in use or already gone */
+        }
+      }
+    } catch {
+      /* best effort */
+    }
+    app.setPath("userData", path.join(tmp, `herdr-studio-e2e-${Date.now()}-${process.pid}`));
+  } catch {
+    /* best effort */
+  }
+}
+
 let win: BrowserWindow | null = null;
 
 // Two long-lived event connections:
 //   hub A — global workspace/tab/pane/agent state events
-//   hub B — output stream for the currently viewed pane (swapped on selection)
+//   hub B — output stream for the currently viewed pane(s) (swapped on selection)
 let hubA: { subs: Subscription[]; sock: import("node:net").Socket } | null = null;
-let hubB: { paneId: string; state: PaneStreamState } | null = null;
+let hubB: { states: PaneStreamState[] } | null = null;
 let hubADownTimer: NodeJS.Timeout | null = null;
 
 interface PaneStreamState {
@@ -103,45 +135,56 @@ async function connectHubA(): Promise<void> {
 
 let hubBBackoff = 400;
 
-async function setPaneStream(paneId: string | null): Promise<void> {
+async function setPaneStream(panes: string | string[] | null): Promise<void> {
   if (hubB) {
-    const old = hubB;
+    for (const s of hubB.states) s.stop = true;
     hubB = null;
-    old.state.stop = true;
   }
-  if (!paneId) return;
-  const state: PaneStreamState = { paneId, lastText: "", stop: false };
-  hubB = { paneId, state };
-  void runPaneStream(state);
+  const ids = Array.isArray(panes) ? panes : panes ? [panes] : [];
+  if (!ids.length) return;
+  const states: PaneStreamState[] = ids.map((paneId) => ({
+    paneId,
+    lastText: "",
+    stop: false,
+  }));
+  hubB = { states };
+  void runPaneStreams(states);
 }
 
 /**
- * Output stream for the viewed pane. `pane.output_matched` subscriptions turn
- * out to be one-shot (single push on first match), and `events.wait` does not
- * support output matches yet — so poll `pane.read` and forward on change.
+ * Output stream for the viewed pane(s). `pane.output_matched` subscriptions
+ * turn out to be one-shot (single push on first match), and `events.wait` does
+ * not support output matches yet — so poll `pane.read` and forward on change.
+ * Unified layout mode passes every pane of the active tab, so the mosaic can
+ * render live output for all cells.
  */
-async function runPaneStream(state: PaneStreamState): Promise<void> {
-  while (!state.stop && hubB?.state === state) {
-    try {
-      const res = await client.rpc(
-        "pane.read",
-        {
-          pane_id: state.paneId,
-          source: "recent_unwrapped",
-          lines: 400,
-          format: "ansi",
-          strip_ansi: false,
-        },
-        8000,
-      );
-      if (state.stop || hubB?.state !== state) break;
-      const read = (res as { read?: { text?: string; revision?: number } }).read;
-      if (read && typeof read.text === "string" && read.text !== state.lastText) {
-        state.lastText = read.text;
-        send("herdr:event", { event: "studio.pane_output", data: { read } });
+async function runPaneStreams(states: PaneStreamState[]): Promise<void> {
+  const alive = (state: PaneStreamState) =>
+    hubB !== null && hubB.states.some((s) => s === state);
+  while (hubB && states.some((s) => !s.stop)) {
+    for (const state of states) {
+      if (state.stop || !alive(state)) continue;
+      try {
+        const res = await client.rpc(
+          "pane.read",
+          {
+            pane_id: state.paneId,
+            source: "recent_unwrapped",
+            lines: 400,
+            format: "ansi",
+            strip_ansi: false,
+          },
+          8000,
+        );
+        if (state.stop || !alive(state)) continue;
+        const read = (res as { read?: { text?: string; revision?: number } }).read;
+        if (read && typeof read.text === "string" && read.text !== state.lastText) {
+          state.lastText = read.text;
+          send("herdr:event", { event: "studio.pane_output", data: { read } });
+        }
+      } catch {
+        // Pane closed or server restarting; loop on and pick up recovery.
       }
-    } catch {
-      // Pane closed or server restarting; loop on and pick up recovery.
     }
     await sleepMs(600);
   }
@@ -200,8 +243,8 @@ function registerIpc(): void {
   ipcMain.handle("herdr:set-global-subs", async (_e, subs: Subscription[]) => {
     await openHubA(subs.length ? subs : GLOBAL_SUBSCRIPTIONS);
   });
-  ipcMain.handle("herdr:set-pane-stream", async (_e, paneId: string | null) => {
-    await setPaneStream(paneId);
+  ipcMain.handle("herdr:set-pane-stream", async (_e, panes: string | string[] | null) => {
+    await setPaneStream(panes);
   });
   ipcMain.handle("herdr:socket-info", () => socketDescription());
   ipcMain.handle("herdr:notify", (_e, opts: { title: string; body: string }) => {
@@ -231,6 +274,126 @@ function registerIpc(): void {
     else if (action === "max") (w.isMaximized() ? w.unmaximize() : w.maximize());
     else w.close();
   });
+
+  // ---- F2: right tool sidebar (local file tree / preview / open) ----
+  ipcMain.handle("fs:tree", (_e, dir: string, depth?: number) => {
+    try {
+      // Root readability check — surface a real error state instead of an
+      // empty-looking tree. Per-subdirectory failures still degrade to [].
+      fs.readdirSync(dir, { withFileTypes: true });
+      return buildFileTree(dir, typeof depth === "number" ? depth : 3);
+    } catch (err: any) {
+      return { error: String(err?.message ?? err) };
+    }
+  });
+  ipcMain.handle("fs:read", (_e, p: string) => readFilePreview(p));
+  ipcMain.handle("fs:open", async (_e, p: string) => {
+    return shell.openPath(p);
+  });
+}
+
+// ---------- F2 local file access ----------
+//
+// Local developer tool: paths are NOT sandboxed, the renderer only ever shows
+// entries that came from the tree rooted at a pane cwd.
+
+export interface FsNode {
+  name: string;
+  path: string;
+  type: "dir" | "file";
+  children?: FsNode[];
+}
+
+const FS_SKIP_DIRS = new Set(["node_modules", ".git"]);
+const FS_MAX_ENTRIES = 500;
+const FS_MAX_TEXT_BYTES = 512 * 1024;
+const FS_MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+
+const IMAGE_EXT_MIME: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".svg": "image/svg+xml",
+  ".webp": "image/webp",
+  ".bmp": "image/bmp",
+  ".ico": "image/x-icon",
+};
+
+/** Extensions we preview as text; anything unknown is "other" (open externally). */
+const TEXT_EXT = new Set([
+  ".txt", ".md", ".markdown", ".json", ".jsonc", ".js", ".mjs", ".cjs", ".ts",
+  ".tsx", ".jsx", ".css", ".scss", ".less", ".html", ".htm", ".xml", ".yml",
+  ".yaml", ".toml", ".ini", ".cfg", ".conf", ".sh", ".bash", ".ps1", ".psm1",
+  ".py", ".rb", ".php", ".sql", ".rs", ".go", ".java", ".kt", ".c", ".h",
+  ".cpp", ".hpp", ".cs", ".m", ".swift", ".log", ".csv", ".tsv", ".env",
+  ".lock", ".gitignore", ".gitattributes", ".editorconfig", ".prd", ".map",
+]);
+
+function buildFileTree(dir: string, depth: number): FsNode[] {
+  const walk = (d: string, level: number): FsNode[] => {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(d, { withFileTypes: true });
+    } catch {
+      return [];
+    }
+    entries.sort((a, b) => {
+      if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1;
+      return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+    });
+    const out: FsNode[] = [];
+    for (const entry of entries) {
+      if (out.length >= FS_MAX_ENTRIES) break;
+      if (entry.name.startsWith(".")) continue; // hidden
+      const full = path.join(d, entry.name);
+      if (entry.isDirectory()) {
+        if (FS_SKIP_DIRS.has(entry.name.toLowerCase())) continue;
+        out.push({
+          name: entry.name,
+          path: full,
+          type: "dir",
+          children: level < depth ? walk(full, level + 1) : [],
+        });
+      } else if (entry.isFile()) {
+        out.push({ name: entry.name, path: full, type: "file" });
+      }
+    }
+    return out;
+  };
+  return walk(dir, 1);
+}
+
+export type FilePreview =
+  | { kind: "text"; data: string; path: string }
+  | { kind: "image"; data: string; path: string }
+  | { kind: "other"; data: string; path: string };
+
+function readFilePreview(p: string): FilePreview {
+  const ext = path.extname(p).toLowerCase();
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(p);
+  } catch {
+    return { kind: "other", data: p, path: p };
+  }
+  const mime = IMAGE_EXT_MIME[ext];
+  if (mime && stat.isFile() && stat.size <= FS_MAX_IMAGE_BYTES) {
+    try {
+      const b64 = fs.readFileSync(p).toString("base64");
+      return { kind: "image", data: `data:${mime};base64,${b64}`, path: p };
+    } catch {
+      return { kind: "other", data: p, path: p };
+    }
+  }
+  if (TEXT_EXT.has(ext) && stat.isFile() && stat.size <= FS_MAX_TEXT_BYTES) {
+    try {
+      return { kind: "text", data: fs.readFileSync(p, "utf8"), path: p };
+    } catch {
+      /* fall through */
+    }
+  }
+  return { kind: "other", data: p, path: p };
 }
 
 async function createWindow(): Promise<void> {
@@ -252,6 +415,24 @@ async function createWindow(): Promise<void> {
   // Register before loadURL: in dev the page can paint while loadURL is still
   // awaiting, and a late listener would miss ready-to-show — window never shows.
   win.once("ready-to-show", () => win?.show());
+
+  // Navigation guard: the window only ever shows the app bundle. Anything else
+  // (window.open or top-level navigation to a remote/file URL) is denied and,
+  // for http(s), handed to the system browser instead.
+  const isAppUrl = (url: string) => {
+    const devUrl = process.env.ELECTRON_RENDERER_URL;
+    if (devUrl) return url.startsWith(devUrl);
+    return url.startsWith("file://");
+  };
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
+    return { action: "deny" };
+  });
+  win.webContents.on("will-navigate", (e, url) => {
+    if (isAppUrl(url)) return;
+    e.preventDefault();
+    if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
+  });
 
   const devUrl = process.env.ELECTRON_RENDERER_URL;
   if (devUrl) {
@@ -304,6 +485,6 @@ app.whenReady().then(async () => {
 
 app.on("window-all-closed", () => {
   if (hubA) hubA.sock.destroy();
-  if (hubB) hubB.state.stop = true;
+  if (hubB) for (const s of hubB.states) s.stop = true;
   app.quit();
 });

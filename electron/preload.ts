@@ -5,14 +5,18 @@ const api = {
     ipcRenderer.invoke("herdr:invoke", method, params, timeoutMs),
   setGlobalSubs: (subs: unknown[]) =>
     ipcRenderer.invoke("herdr:set-global-subs", subs),
-  setPaneStream: (paneId: string | null) =>
-    ipcRenderer.invoke("herdr:set-pane-stream", paneId),
+  setPaneStream: (panes: string | string[] | null) =>
+    ipcRenderer.invoke("herdr:set-pane-stream", panes),
   socketInfo: () => ipcRenderer.invoke("herdr:socket-info"),
   notify: (title: string, body: string) =>
     ipcRenderer.invoke("herdr:notify", { title, body }),
   launchServer: () => ipcRenderer.invoke("herdr:launch-server"),
   win: (action: "min" | "max" | "close") =>
     ipcRenderer.invoke("herdr:win", action),
+  // F2: local file access for the right tool sidebar
+  fsTree: (dir: string, depth?: number) => ipcRenderer.invoke("fs:tree", dir, depth),
+  fsRead: (path: string) => ipcRenderer.invoke("fs:read", path),
+  fsOpen: (path: string) => ipcRenderer.invoke("fs:open", path),
   onEvent: (cb: (ev: { event: string; data: any }) => void) => {
     const listener = (_e: unknown, ev: { event: string; data: any }) => cb(ev);
     ipcRenderer.on("herdr:event", listener);

@@ -25,6 +25,18 @@ export interface Toast {
   message: string;
 }
 
+export type LayoutMode = "separate" | "unified";
+
+const LAYOUT_KEY = "herdr-studio-layout-mode";
+
+function readStoredLayoutMode(): LayoutMode {
+  try {
+    return localStorage.getItem(LAYOUT_KEY) === "unified" ? "unified" : "separate";
+  } catch {
+    return "separate";
+  }
+}
+
 interface StudioState {
   status: ConnStatus;
   socket: { pointer: string; target: string } | null;
@@ -40,6 +52,15 @@ interface StudioState {
 
   outputs: Record<string, OutputState>;
   toasts: Toast[];
+
+  /** F3: terminal area layout mode. */
+  layoutMode: LayoutMode;
+  setLayoutMode: (mode: LayoutMode) => void;
+  /** F2: right tool sidebar visibility. */
+  rightSidebarOpen: boolean;
+  toggleRightSidebar: () => void;
+  /** Point the main-process output stream at the pane(s) the user is watching. */
+  syncPaneStream: () => void;
 
   booted: boolean;
 
@@ -57,6 +78,8 @@ interface StudioState {
 
 let toastSeq = 1;
 let snapshotTimer: ReturnType<typeof setTimeout> | null = null;
+/** Last pane id set handed to the main-process stream (dedup for syncPaneStream). */
+let lastStreamKey: string | null = null;
 
 const GLOBAL_SUBS = [
   "workspace.created",
@@ -135,7 +158,32 @@ export const useStore = create<StudioState>((set, get) => ({
 
   outputs: {},
   toasts: [],
+
+  layoutMode: readStoredLayoutMode(),
+  rightSidebarOpen: false,
+
   booted: false,
+
+  setLayoutMode: (mode) => {
+    set({ layoutMode: mode });
+    try {
+      localStorage.setItem(LAYOUT_KEY, mode);
+    } catch {
+      /* non-fatal */
+    }
+    // Unified mode streams every pane of the active tab; separate follows one.
+    get().syncPaneStream();
+    if (mode === "unified") {
+      const { panes, activeTabId } = get();
+      for (const p of panes) {
+        if (p.tab_id === activeTabId) void get().refreshPaneOutput(p.pane_id);
+      }
+    }
+  },
+
+  toggleRightSidebar: () => {
+    set((s) => ({ rightSidebarOpen: !s.rightSidebarOpen }));
+  },
 
   boot: async () => {
     try {
@@ -194,6 +242,9 @@ export const useStore = create<StudioState>((set, get) => ({
       }
       const finalPaneId = paneId;
       if (finalPaneId) void get().refreshPaneOutput(finalPaneId);
+      // Keep the unified-mode stream set current with pane create/close events
+      // (no-op when the id set didn't change).
+      get().syncPaneStream();
     } catch (err: any) {
       if (get().status !== "reconnecting") {
         set({ status: "no-server" });
@@ -223,8 +274,30 @@ export const useStore = create<StudioState>((set, get) => ({
 
   selectPane: (id) => {
     set({ activePaneId: id });
-    void window.herdr.setPaneStream(id);
+    get().syncPaneStream();
     void get().refreshPaneOutput(id);
+  },
+
+  /**
+   * Separate mode follows only the active pane; unified mode follows every
+   * pane of the active tab so the mosaic shows live output everywhere. Called
+   * on selection changes AND after every snapshot refresh (so pane_created /
+   * pane_closed events keep the unified stream set current). Deduplicated by
+   * the requested id set so repeated calls don't tear down the stream loop.
+   */
+  syncPaneStream: () => {
+    const { layoutMode, panes, activeTabId, activePaneId } = get();
+    let ids: string | string[] | null;
+    if (layoutMode === "unified" && activeTabId) {
+      const list = panes.filter((p) => p.tab_id === activeTabId).map((p) => p.pane_id);
+      ids = list.length ? list : activePaneId;
+    } else {
+      ids = activePaneId;
+    }
+    const key = JSON.stringify(ids ?? null);
+    if (key === lastStreamKey) return;
+    lastStreamKey = key;
+    void window.herdr.setPaneStream(ids);
   },
 
   refreshPaneOutput: async (paneId) => {
@@ -272,8 +345,12 @@ export const useStore = create<StudioState>((set, get) => ({
     if (ev.event === "studio.pane_output" || ev.event === "pane.output_matched") {
       const read = ev.data?.read;
       if (!read?.pane_id) return;
-      // Only the viewed pane is streamed; ignore stale pushes after switches.
-      if (read.pane_id !== get().activePaneId) return;
+      // Only the watched pane(s) are streamed; ignore stale pushes.
+      const st = get();
+      const unifiedPane =
+        st.layoutMode === "unified" &&
+        st.panes.some((p) => p.pane_id === read.pane_id && p.tab_id === st.activeTabId);
+      if (read.pane_id !== st.activePaneId && !unifiedPane) return;
       set((s) => {
         const prev = s.outputs[read.pane_id];
         if (prev && prev.revision > read.revision) return s;

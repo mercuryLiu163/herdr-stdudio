@@ -1,4 +1,4 @@
-import type { PaneReadResult, Snapshot } from "./types";
+import type { PaneLayout, PaneReadResult, Snapshot } from "./types";
 
 /** Typed wrappers for the herdr socket methods the studio uses. */
 
@@ -23,6 +23,25 @@ export function paneRead(
     format: "ansi",
     strip_ansi: false,
   });
+}
+
+/** Layout snapshot of the tab owning `paneId` (F3 unified mode). */
+export function paneLayout(paneId: string): Promise<{ layout: PaneLayout }> {
+  return rpc("pane.layout", { pane_id: paneId });
+}
+
+/**
+ * Resize via herdr. Verified against herdr protocol 19: `amount` is a ratio
+ * delta (0..1) that moves the divider toward `direction` ("left"/"right"/
+ * "up"/"down"), clamped to the min pane size. The reply carries the fresh
+ * layout under `resize.layout`.
+ */
+export function paneResize(
+  paneId: string,
+  direction: "left" | "right" | "up" | "down",
+  amount: number,
+): Promise<{ resize: { changed: boolean; pane_id: string; layout?: PaneLayout } }> {
+  return rpc("pane.resize", { pane_id: paneId, direction, amount });
 }
 
 export function agentPrompt(

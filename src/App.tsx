@@ -4,6 +4,7 @@ import { TitleBar, Rail } from "./components/Chrome";
 import { Sidebar } from "./components/Sidebar";
 import { TabList } from "./components/TabList";
 import { MainPane } from "./components/MainPane";
+import { RightSidebar } from "./components/RightSidebar";
 import { Toasts } from "./components/Toasts";
 import { NoServer } from "./components/NoServer";
 
@@ -11,6 +12,7 @@ export function App() {
   const boot = useStore((s) => s.boot);
   const status = useStore((s) => s.status);
   const booted = useStore((s) => s.booted);
+  const rightSidebarOpen = useStore((s) => s.rightSidebarOpen);
 
   useEffect(() => {
     void boot();
@@ -36,6 +38,7 @@ export function App() {
         <Sidebar />
         <TabList />
         <MainPane />
+        {rightSidebarOpen && <RightSidebar />}
       </div>
       <Toasts />
     </div>
