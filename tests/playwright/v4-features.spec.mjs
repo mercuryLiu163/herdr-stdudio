@@ -51,6 +51,10 @@ test.describe("F1 normalized transcript", () => {
     const thread = page.getByTestId("chat-immersive");
     const baked = thread.locator("[data-testid^='msg-']").filter({ hasText: /Baked for/ });
     await expect(baked).toHaveCount(0);
+    // NOTE(test-fix): add the positive half of this assertion (review m5) —
+    // the status line must land in the weak meta separator row, not vanish.
+    const metaRow = thread.locator("[data-testid='chat-meta']").filter({ hasText: /Baked for 28s/ });
+    await expect(metaRow.first()).toBeVisible();
   });
 
   test("TUI 页脚整行丢弃", async () => {
@@ -58,7 +62,12 @@ test.describe("F1 normalized transcript", () => {
     const { page } = ctx;
     const thread = page.getByTestId("chat-immersive");
     await expect(thread.locator("[data-testid^='msg-']").filter({ hasText: /bypass permissions/ })).toHaveCount(0);
-    await expect(thread.locator("body")).not.toContainText("shift+tab to cycle");
+    // NOTE(test-fix): `thread.locator("body")` can never resolve — <body> is
+    // never a descendant of the chat surface — and a negated toContainText
+    // still waits for at least one element ("element(s) not found" fails even
+    // for .not). The intent is "the footer appears nowhere on the page", so
+    // assert against the document body instead.
+    await expect(page.locator("body")).not.toContainText("shift+tab to cycle");
   });
 
   test("工具输出的多列文件列表重排为网格", async () => {
@@ -79,6 +88,17 @@ test.describe("F1 normalized transcript", () => {
   test("排版一致性：所有消息块左缩进一致", async () => {
     await seedAgent();
     const { page } = ctx;
+    // NOTE(test-fix): blocks stream in asynchronously after the agent is
+    // reported; the original single evaluate raced the transcript delivery and
+    // measured an empty thread ("暂无对话内容"). Poll until the seed produced
+    // its msg-* blocks, then measure.
+    await expect
+      .poll(
+        async () =>
+          page.evaluate(() => document.querySelectorAll("[data-testid^='msg-']").length),
+        { timeout: 10_000 },
+      )
+      .toBeGreaterThanOrEqual(2);
     const offsets = await page.evaluate(() => {
       const blocks = [...document.querySelectorAll("[data-testid^='msg-']")];
       return blocks.map((b) => b.getBoundingClientRect().left);

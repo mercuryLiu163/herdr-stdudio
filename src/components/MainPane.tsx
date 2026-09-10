@@ -7,7 +7,8 @@ import type { Block } from "../chat-parser";
 import { renderMarkdown, highlightCode } from "../markdown";
 import type { PaneLayout, PaneLayoutEntry, PaneRect } from "../types";
 import { paneLayout, paneResize, agentPrompt, paneSendText, paneSendKeys, agentSendKeys } from "../api";
-import { IconBook, IconSend, IconTerminal } from "./icons";
+import { slashCommandsFor, filterSlashCommands } from "../slash-commands";
+import { IconBook, IconClock, IconSend, IconTerminal } from "./icons";
 import { IconColumns, IconMosaic } from "./icons";
 
 const statusLabel: Record<string, string> = {
@@ -415,7 +416,8 @@ function sameBlock(a: Block, b: Block): boolean {
     a.text === b.text &&
     a.toolName === b.toolName &&
     a.lang === b.lang &&
-    (a.images ?? []).join("\n") === (b.images ?? []).join("\n")
+    (a.images ?? []).join("\n") === (b.images ?? []).join("\n") &&
+    (a.files ?? []).join("\n") === (b.files ?? []).join("\n")
   );
 }
 
@@ -454,16 +456,40 @@ const ChatBlock = memo(
             ))}
           </div>
         );
-      case "tool":
+      case "tool": {
+        const files = block.files ?? [];
         return (
-          <details className="chat-msg tool" data-testid="msg-tool">
+          <details
+            className="chat-msg tool"
+            data-testid="msg-tool"
+            /* A tool block carrying a file listing renders it open: the grid
+               is the block's body, not expandable detail. */
+            open={files.length > 0 || undefined}
+          >
             <summary>
               <span className="tool-chip" data-testid="tool-chip" style={{ "--chip-hue": hashHue(block.toolName ?? "tool") } as CSSProperties}>
                 <span className="tool-chip-name">{block.toolName ?? "tool"}</span>
               </span>
               <span className="tool-summary">{block.text}</span>
             </summary>
-            <pre>{block.text}</pre>
+            {files.length > 0 ? (
+              /* V4 F1: multi-column TUI listing re-laid-out as a uniform grid
+                 (root fix for the ragged terminal columns). */
+              <div className="tool-files" data-testid="tool-files">
+                {files.map((f) => (
+                  <span
+                    key={f}
+                    className={`file-chip${f.endsWith("/") ? " dir" : ""}`}
+                    data-testid="file-chip"
+                    title={f}
+                  >
+                    {f}
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <pre>{block.text}</pre>
+            )}
             {(block.images ?? []).map((img) => (
               <div className="chat-tool-images" key={img}>
                 <ChatImage path={img} cwd={cwd} cwds={cwds} />
@@ -471,15 +497,33 @@ const ChatBlock = memo(
             ))}
           </details>
         );
+      }
       case "code":
         return (
           <pre className="chat-msg code" data-testid="msg-code">
             <CodeBody text={block.text} lang={block.lang} />
           </pre>
         );
-      case "meta":
+      case "thinking":
+        /* V4 F1: collapsed thinking row — weakened, expandable, never prose. */
         return (
-          <div className="chat-meta" data-testid="msg-meta">
+          <details className="chat-thinking" data-testid="thinking-row">
+            <summary>
+              <IconClock size={12} />
+              <span>思考 {block.text || "…"}</span>
+              <span className="thinking-hint hint-collapsed">已折叠 · 点击展开</span>
+              <span className="thinking-hint hint-open">点击收起</span>
+            </summary>
+            <div className="thinking-body">
+              思考过程已被 agent 折叠。在终端原始输出里按 ctrl+o 可查看完整原文。
+            </div>
+          </details>
+        );
+      case "meta":
+        /* V4 F1: meta is a weak separator row — deliberately NOT under the
+           `msg-*` namespace so status text never counts as message content. */
+        return (
+          <div className="chat-meta" data-testid="chat-meta">
             {block.text}
           </div>
         );
@@ -961,6 +1005,27 @@ function Composer() {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
+  // V4 F2 slash palette: open only while typing a single-line "/query" on an
+  // agent pane; explicit state (not derived) so selecting a command and
+  // keeping the text in the input does not re-open the palette.
+  const [slashOpen, setSlashOpen] = useState(false);
+  const [slashIdx, setSlashIdx] = useState(0);
+
+  const slashItems = useMemo(() => {
+    if (!agent || !slashOpen) return [];
+    if (!/^\/[^\n\s]*$/.test(text)) return []; // multi-line or args started
+    return filterSlashCommands(slashCommandsFor(agent.agent), text);
+  }, [agent, slashOpen, text]);
+  const paletteOpen = slashItems.length > 0;
+  const hlIdx = Math.min(slashIdx, Math.max(0, slashItems.length - 1));
+
+  const chooseSlash = (i: number) => {
+    const item = slashItems[i];
+    if (!item) return;
+    setText(item.cmd);
+    setSlashOpen(false);
+    taRef.current?.focus();
+  };
 
   // F3 input-target dropdown options (unified mode only). `paneId` doubles as
   // the selected target so the dropdown and cell clicks stay in sync.
@@ -985,7 +1050,19 @@ function Composer() {
       if (agent) {
         // agent.* accepts the hosting pane id as target; more reliable than the
         // display name, which detected agents often don't have.
-        await agentPrompt(agent.pane_id, text.trim());
+        try {
+          await agentPrompt(agent.pane_id, text.trim());
+        } catch (err: any) {
+          // herdr only rejects agent.prompt with this exact condition for
+          // detected/reported agents that are not active NAMED agents; only
+          // that case falls back to typing into the pane. Timeouts and other
+          // errors must surface (rethrow) — a blind fallback could re-deliver
+          // the prompt after a slow-but-successful attempt and mask failures.
+          if (!/not an active named agent/i.test(String(err?.message ?? err))) throw err;
+          // Fall back to the plain-text TUI channel every agent accepts
+          // (V4 F2 slash commands rely on it).
+          await paneSendText(paneId, text.trim());
+        }
       } else {
         await paneSendText(paneId, text);
       }
@@ -1015,6 +1092,25 @@ function Composer() {
     <div className="composer-wrap">
       {error && <div className="inline-error">{error}</div>}
       <div className="composer">
+        {paletteOpen && (
+          <div className="slash-palette" data-testid="slash-palette">
+            {slashItems.map((c, i) => (
+              <button
+                type="button"
+                key={c.cmd}
+                className={`slash-item${i === hlIdx ? " active" : ""}`}
+                data-testid="slash-item"
+                // keep textarea focus on click (mousedown would blur it)
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => chooseSlash(i)}
+                onMouseEnter={() => setSlashIdx(i)}
+              >
+                <span className="slash-cmd">{c.cmd}</span>
+                <span className="slash-desc">{c.desc}</span>
+              </button>
+            ))}
+          </div>
+        )}
         <textarea
           ref={taRef}
           value={text}
@@ -1026,8 +1122,39 @@ function Composer() {
                 : "先选择一个窗格"
           }
           disabled={!paneId || status === "no-server"}
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => {
+            const v = e.target.value;
+            setText(v);
+            setSlashIdx(0);
+            // open only for a fresh single-line "/" query on an agent pane
+            setSlashOpen(!!agent && v.startsWith("/") && !/\s/.test(v));
+          }}
+          onBlur={() => setSlashOpen(false)}
           onKeyDown={(e) => {
+            // Palette open: navigation / selection is consumed here and never
+            // reaches the send path.
+            if (paletteOpen) {
+              if (e.key === "ArrowDown") {
+                e.preventDefault();
+                setSlashIdx((hlIdx + 1) % slashItems.length);
+                return;
+              }
+              if (e.key === "ArrowUp") {
+                e.preventDefault();
+                setSlashIdx((hlIdx - 1 + slashItems.length) % slashItems.length);
+                return;
+              }
+              if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.altKey)) {
+                // select = backfill the input; sending needs a second Enter
+                e.preventDefault();
+                chooseSlash(hlIdx);
+                return;
+              }
+              if (e.key === "Escape") {
+                setSlashOpen(false);
+                return;
+              }
+            }
             if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.altKey) {
               e.preventDefault();
               void send();
