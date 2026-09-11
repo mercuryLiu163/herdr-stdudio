@@ -163,3 +163,15 @@ export function IconClock({ size = 12 }: { size?: number }) {
     </svg>
   );
 }
+
+/** Git branch glyph (V5 F2 sidebar app icon). */
+export function IconBranch({ size = 14 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="4.5" cy="3.5" r="1.8" />
+      <circle cx="4.5" cy="12.5" r="1.8" />
+      <circle cx="11.5" cy="6" r="1.8" />
+      <path d="M4.5 5.3v5.4M11.5 7.8c0 2.4-2.2 3-4.4 3.2" />
+    </svg>
+  );
+}

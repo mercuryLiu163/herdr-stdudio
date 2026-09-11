@@ -375,3 +375,65 @@ export function parseTranscript(text: string): Block[] {
 
   return blocks;
 }
+
+/**
+ * V5 F1 turn grouping: a turn is the sequence of blocks from a user prompt up
+ * to (not including) the next user prompt; blocks before the first user block
+ * form the leading turn (the transcript may open mid-conversation). Only user
+ * blocks open turns — meta separators (`Worked for Ns`) and thinking rows
+ * belong to the turn they stream in, so a turn's header can summarize its
+ * tool steps, touched files and duration.
+ */
+export interface Turn {
+  /** user prompt blocks that opened this turn ([] for the leading turn) */
+  users: Block[];
+  /** agent-produced blocks rendered under the turn header */
+  body: Block[];
+}
+
+export function groupTurns(blocks: Block[]): Turn[] {
+  const turns: Turn[] = [];
+  let cur: Turn = { users: [], body: [] };
+  for (const b of blocks) {
+    if (b.type === "user") {
+      // Flush whatever came before this prompt — including the LEADING turn
+      // (blocks accumulated before the first user block, e.g. when the pane's
+      // rolling window starts mid-conversation). Never drop it.
+      if (cur.users.length || cur.body.length) turns.push(cur);
+      cur = { users: [b], body: [] };
+    } else {
+      cur.body.push(b);
+    }
+  }
+  if (cur.users.length || cur.body.length) turns.push(cur);
+  return turns;
+}
+
+/**
+ * Turn header stats for a turn body (V5 F1): tool-step count, deduplicated
+ * file paths from tool blocks (order preserved), and the duration label of
+ * the first meta line carrying one ("Worked for 12s" → "12s"). Everything is
+ * derived from the transcript only — missing data simply stays undefined, the
+ * header never invents numbers (no token/±line counts: herdr has none).
+ */
+export interface TurnStats {
+  steps: number;
+  files: string[];
+  duration: string | null;
+}
+
+export function turnStats(turn: Turn): TurnStats {
+  const files: string[] = [];
+  let steps = 0;
+  let duration: string | null = null;
+  for (const b of turn.body) {
+    if (b.type === "tool") {
+      steps++;
+      for (const f of b.files ?? []) if (!files.includes(f)) files.push(f);
+    } else if (b.type === "meta" && duration === null) {
+      const m = b.text.match(/([\d.]+)\s*s\b/i);
+      if (m) duration = `${m[1]}s`;
+    }
+  }
+  return { steps, files, duration };
+}

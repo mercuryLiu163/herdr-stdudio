@@ -102,6 +102,7 @@
      tool/code/thinking/meta) draws its spacing from this single variable set;
      no block may hardcode its own indent/gap (review item). */
   --chat-gap: 12px; /* vertical rhythm between blocks */
+  --chat-turn-gap: 24px; /* V5 F1: vertical rhythm between turns (> blocks) */
   --chat-indent: 20px; /* the one fixed nesting indent step */
   --chat-block-x: 12px; /* inner horizontal padding of framed blocks */
 }
@@ -801,9 +802,19 @@ html[data-theme="light"] .titlebar-btn .icon-moon {
   min-height: 140px;
   display: flex;
   flex-direction: column;
-  gap: var(--chat-gap);
+  /* V5 F1: the thread stacks whole turns; turn spacing > block spacing. */
+  gap: var(--chat-turn-gap);
   padding-top: 2px;
   user-select: text;
+}
+
+/* V5 F1: one conversation turn = user prompt + header bar + agent blocks +
+   modified-files card. Blocks inside keep the shared block rhythm. */
+.chat-turn {
+  display: flex;
+  flex-direction: column;
+  gap: var(--chat-gap);
+  min-width: 0;
 }
 
 .chat-empty {
@@ -843,8 +854,9 @@ html[data-theme="light"] .titlebar-btn .icon-moon {
   color: var(--text);
   white-space: pre-wrap;
   word-break: break-word;
-  font-size: 13.5px;
-  line-height: 1.7;
+  /* V5 F1 typography (reference screenshot): 14px prose, roomy leading. */
+  font-size: 14px;
+  line-height: 1.75;
 }
 
 .chat-msg.tool {
@@ -935,6 +947,10 @@ html[data-theme="light"] .titlebar-btn .icon-moon {
 .chat-thinking summary:hover {
   color: var(--text-dim);
 }
+[data-testid="cwd-select"] {
+  text-overflow: ellipsis;
+}
+
 .chat-thinking .thinking-hint.hint-open { display: none; }
 .chat-thinking[open] .thinking-hint.hint-collapsed { display: none; }
 .chat-thinking[open] .thinking-hint.hint-open { display: inline; }
@@ -950,33 +966,160 @@ html[data-theme="light"] .titlebar-btn .icon-moon {
   line-height: 1.6;
 }
 
-/* V4 F1: tool-output file listing as a uniform grid — replaces the ragged
-   multi-column TUI layout. All chips get the same track width. */
-.tool-files {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-  gap: 6px;
-  padding: 2px var(--chat-block-x) 10px;
+/* V5 F1: turn header bar — avatar monogram + agent name + clock + stat chips
+   + collapse chevron. Neutral washes only; the avatar carries the hash hue. */
+.turn-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  background: var(--wash-1);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+  min-width: 0;
 }
-.file-chip {
-  display: block;
+.turn-avatar {
+  width: 18px;
+  height: 18px;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--on-accent);
+  flex-shrink: 0;
+}
+.turn-agent {
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.turn-time {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+.turn-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10.5px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--wash-3);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.turn-collapse {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+.turn-collapse:hover {
+  background: var(--wash-4);
+  color: var(--text);
+}
+.turn-collapse svg {
+  transition: transform 0.14s ease;
+  transform: rotate(90deg); /* expanded: chevron points down */
+}
+.turn-collapse:not(.open) svg {
+  transform: rotate(0deg); /* collapsed: chevron points right */
+}
+
+/* V5 F1: per-turn modified-files card (mcode TurnFilesCard look) — neutral
+   surface, folded to one summary line, expands to the file rows. */
+.turn-files-card {
+  align-self: stretch;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--wash-1);
+  font-size: 12px;
+  color: var(--text-dim);
+  overflow: hidden;
+}
+.tfc-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  color: var(--text-dim);
+  font-size: 12px;
+  text-align: left;
+  min-width: 0;
+}
+.tfc-head:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+.tfc-title {
+  font-weight: 600;
+  color: var(--text);
+}
+.tfc-chevron {
+  margin-left: auto;
+  display: inline-flex;
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+.tfc-chevron svg {
+  transition: transform 0.14s ease;
+  transform: rotate(90deg);
+}
+.tfc-chevron.open svg {
+  transform: rotate(0deg);
+}
+.tfc-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-top: 1px solid var(--border);
+  padding: 6px 8px 8px;
+}
+.turn-file-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--wash-2);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-dim);
+  min-width: 0;
+}
+.tfc-row-icon {
+  display: inline-flex;
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+.tfc-row-path {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 11.5px;
-  font-family: var(--font-mono);
-  color: var(--text-dim);
-  background: var(--wash-2);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 3px 8px;
 }
-/* directories (trailing "/") are tinted to stand apart from files */
-.file-chip.dir {
+/* directories (trailing "/") keep the V4 info tint, as in the old grid */
+.turn-file-row.dir {
   color: var(--info);
-  border-color: rgba(107, 154, 196, 0.35);
   background: rgba(107, 154, 196, 0.1);
+}
+.turn-file-row.dir .tfc-row-icon {
+  color: var(--info);
 }
 
 /* ============ Immersive chat surface (V3 F2) ============ */
@@ -1010,10 +1153,12 @@ html[data-theme="light"] .titlebar-btn .icon-moon {
   user-select: text;
 }
 
-/* Markdown body of an assistant message */
+/* Markdown body of an assistant message.
+   V5 F1 typography aligned to the reference screenshot: 14px prose, 1.75
+   leading, accent links, tinted inline code, bordered tables. */
 .chat-md {
-  font-size: 13.5px;
-  line-height: 1.7;
+  font-size: 14px;
+  line-height: 1.75;
   color: var(--text);
   word-break: break-word;
 }
@@ -1037,7 +1182,7 @@ html[data-theme="light"] .titlebar-btn .icon-moon {
 .chat-md code {
   font-family: var(--font-mono);
   font-size: 12px;
-  background: var(--wash-1);
+  background: var(--wash-3);
   border-radius: 4px;
   padding: 1px 5px;
 }
@@ -1052,6 +1197,31 @@ html[data-theme="light"] .titlebar-btn .icon-moon {
 .chat-md pre code {
   background: none;
   padding: 0;
+}
+/* V5 F1: GFM tables rendered as framed cards — full grid borders, tinted
+   header row, padded cells, rounded container (reference screenshot style). */
+.chat-md table {
+  border-collapse: collapse;
+  margin: 8px 0;
+  max-width: 100%;
+  border-radius: 8px;
+  overflow: hidden;
+  font-size: 13px;
+}
+.chat-md th,
+.chat-md td {
+  border: 1px solid var(--border-strong);
+  padding: 5px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+.chat-md th {
+  background: var(--wash-3);
+  font-weight: 600;
+  color: var(--text);
+}
+.chat-md tr {
+  background: var(--wash-0);
 }
 .chat-md blockquote {
   border-left: 3px solid var(--border-strong);
@@ -1332,6 +1502,131 @@ body.mosaic-dragging .mosaic-cell-body {
   flex-direction: column;
   flex-shrink: 0;
   min-height: 0;
+}
+
+/* V5 F2: always-visible app switcher strip (mcode icon-bar style) — docked
+   at the window's right edge, outside the collapsible sidebar container. */
+.rs-apps {
+  width: 44px;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 10px 0;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.sidebar-app-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  display: grid;
+  place-items: center;
+  color: var(--text-faint);
+  transition: all 0.12s ease;
+}
+.sidebar-app-btn:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+.sidebar-app-btn.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* V5 F2: git app — branch banner + change list with status-letter tints. */
+.git-branch {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 8px;
+  margin-bottom: 4px;
+  border-radius: 6px;
+  background: var(--wash-2);
+  border: 1px solid var(--border);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  font-family: var(--font-mono);
+}
+.git-branch svg {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+.git-file {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  text-align: left;
+  min-width: 0;
+  color: var(--text-dim);
+}
+.git-file:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+.git-file .git-st {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  width: 18px;
+  text-align: center;
+  flex-shrink: 0;
+  border-radius: 4px;
+  background: var(--wash-3);
+  padding: 1px 0;
+}
+.git-file .git-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+.git-file.st-modified .git-st { color: var(--warn); }
+.git-file.st-added .git-st { color: var(--ok); }
+.git-file.st-deleted .git-st { color: var(--danger); }
+.git-file.st-untracked .git-st { color: var(--text-faint); }
+.git-file.st-other .git-st { color: var(--info); }
+
+/* V5 F2: git diff — raw text through the escaped <pre> channel, +/- tinted. */
+.rs-diff {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+  white-space: pre;
+  overflow-x: auto;
+  background: var(--wash-1);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin: 0;
+  user-select: text;
+}
+.rs-diff .diff-add {
+  color: var(--ok);
+  background: rgba(127, 176, 105, 0.08);
+  display: block;
+}
+.rs-diff .diff-del {
+  color: var(--danger);
+  background: rgba(224, 101, 95, 0.08);
+  display: block;
+}
+.rs-diff .diff-hunk {
+  color: var(--info);
+  display: block;
+}
+.rs-diff .diff-ctx {
+  color: var(--text-faint);
+  display: block;
 }
 
 .rs-section {

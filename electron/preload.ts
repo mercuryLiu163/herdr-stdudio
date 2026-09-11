@@ -17,6 +17,9 @@ const api = {
   fsTree: (dir: string, depth?: number) => ipcRenderer.invoke("fs:tree", dir, depth),
   fsRead: (path: string) => ipcRenderer.invoke("fs:read", path),
   fsOpen: (path: string) => ipcRenderer.invoke("fs:open", path),
+  // V5 F2: git app (directory-scoped repository status / per-file diff)
+  gitStatus: (cwd: string) => ipcRenderer.invoke("git:status", cwd),
+  gitDiff: (cwd: string, path: string) => ipcRenderer.invoke("git:diff", cwd, path),
   onEvent: (cb: (ev: { event: string; data: any }) => void) => {
     const listener = (_e: unknown, ev: { event: string; data: any }) => cb(ev);
     ipcRenderer.on("herdr:event", listener);

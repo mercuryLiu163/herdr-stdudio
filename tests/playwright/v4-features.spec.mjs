@@ -73,11 +73,24 @@ test.describe("F1 normalized transcript", () => {
   test("工具输出的多列文件列表重排为网格", async () => {
     await seedAgent();
     const { page } = ctx;
-    const grid = page.getByTestId("tool-files").first();
-    await expect(grid).toBeVisible();
-    const items = grid.locator("[data-testid='file-chip']");
+    // NOTE(test-fix): V5 F1b removed the in-block `tool-files` grid — the file
+    // listing is aggregated up into the per-turn `turn-files-card` (folded by
+    // default, expandable rows). This assertion migrates 1:1 to the card
+    // contract: 6 deduped chips from the seeded two listing lines, directory
+    // rows keeping the info tint, uniform row layout inside the card.
+    const card = page.getByTestId("turn-files-card").first();
+    await expect(card).toBeVisible();
+    await expect(card).toContainText("6 个文件");
+    // folded by default → no rows; expanding shows all 6 file rows
+    await expect(page.getByTestId("turn-file-row")).toHaveCount(0);
+    await card.locator("[data-testid='turn-files-toggle']").click();
+    const items = page.getByTestId("turn-file-row");
     expect(await items.count()).toBeGreaterThanOrEqual(6);
-    // grid layout: all chips share the same width (uniform columns)
+    await expect(items.first()).toContainText("batch_process_cameras.py");
+    // directory chips keep the V4 dir tint (class + info color)
+    const dirRow = items.filter({ hasText: "cam29_data/" }).first();
+    await expect(dirRow).toHaveClass(/dir/);
+    // rows are uniformly laid out (single-column card rows, same width)
     const widths = [];
     for (const el of await items.elementHandles().then((h) => h.slice(0, 4))) {
       widths.push((await el.boundingBox()).width);

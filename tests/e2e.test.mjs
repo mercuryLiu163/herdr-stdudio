@@ -311,7 +311,7 @@ async function main() {
   });
 
   const markerD10 = "STUDIO_E2E_D10_" + Date.now();
-  await t.run("D10", "agent prompt 路径调用 agent.prompt(target=pane_id)", async () => {
+  await t.run("D10", "agent prompt 经 fallback 送达 pane 且无内联错误", async () => {
     const idx = await chipIndexOf(pane2.pane_id);
     assert(idx >= 0, "pane2 chip index found");
     await cdp.evaluate(clickChipByIndex(idx));
@@ -322,13 +322,22 @@ async function main() {
     assert(hasAgent, "agent present in store");
     await cdp.evaluate(typeInComposer(`echo ${markerD10}`));
     await cdp.evaluate(pressEnterInComposer);
-    // Authority-reported fake agents are not "active named agents", so herdr
-    // rejects agent.prompt — the inline error naming the pane id is the proof
-    // that the app wired the request correctly. End-to-end delivery needs a
-    // real agent (manual test; costs tokens).
+    // NOTE(test-fix): V4 F2 made the composer's error handling deliberate —
+    // when herdr rejects agent.prompt with "is not an active named agent"
+    // (exactly the authority-reported fake agent seeded here), the composer
+    // degrades to the plain-text TUI channel instead of surfacing an inline
+    // error. The old assertion demanded that swallowed error inline, which
+    // contradicts the fallback by design. Assert the actual contract instead:
+    // the prompt is DELIVERED via the fallback (marker shows up in the pane's
+    // transcript) and no inline error is displayed.
     await cdp.waitFor(
-      "agent.prompt wiring error naming the pane id",
-      `(() => { const e = document.querySelector('.inline-error')?.textContent ?? ''; return e.includes('agent.prompt') && e.includes(${JSON.stringify(pane2.pane_id)}); })()`,
+      "prompt delivered via fallback (marker in transcript, no inline error)",
+      `(() => {
+        const s = window.__herdr_store.getState();
+        const o = s.outputs[s.activePaneId];
+        return !!(o && o.text.includes(${JSON.stringify(markerD10)}))
+          && !document.querySelector('.inline-error');
+      })()`,
       20000,
     );
   }, { optional: true });

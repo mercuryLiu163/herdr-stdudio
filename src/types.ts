@@ -94,6 +94,25 @@ export type FilePreview =
   | { kind: "image"; data: string; path: string }
   | { kind: "other"; data: string; path: string };
 
+/** V5 F2: one `XY path` row of `git status --porcelain=v1 -b`. */
+export interface GitStatusEntry {
+  /** index (staged) status letter, " " when none */
+  x: string;
+  /** worktree status letter, " " when none */
+  y: string;
+  /** repo-relative path (rename arrow resolved to the new path) */
+  path: string;
+}
+
+/**
+ * V5 F2: result of the directory-scoped git status. A directory is a
+ * "repository" only when it is the repo root itself (it owns the `.git`
+ * marker); anything else reports `notRepo` instead of an inherited status.
+ */
+export type GitStatus =
+  | { notRepo: true }
+  | { notRepo?: false; branch: string; entries: GitStatusEntry[] };
+
 /** F3: one pane's rectangle from the herdr layout snapshot (character cells). */
 export interface PaneRect {
   x: number;
@@ -135,6 +154,8 @@ declare global {
       fsTree: (dir: string, depth?: number) => Promise<FsNode[] | { error: string }>;
       fsRead: (path: string) => Promise<FilePreview>;
       fsOpen: (path: string) => Promise<string>;
+      gitStatus: (cwd: string) => Promise<GitStatus>;
+      gitDiff: (cwd: string, path: string) => Promise<{ diff: string }>;
       onEvent: (cb: (ev: PushEvent) => void) => () => void;
       onStatus: (cb: (status: ConnStatus) => void) => () => void;
       onResync: (cb: () => void) => () => void;

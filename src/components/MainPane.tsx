@@ -2,14 +2,14 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, MouseEvent as ReactMouseEvent } from "react";
 import { useStore, agentForPane, agentDisplayName } from "../store";
 import { AnsiView } from "../ansi";
-import { parseTranscript } from "../chat-parser";
-import type { Block } from "../chat-parser";
+import { parseTranscript, groupTurns, turnStats } from "../chat-parser";
+import type { Block, Turn } from "../chat-parser";
 import { renderMarkdown, highlightCode } from "../markdown";
 import type { PaneLayout, PaneLayoutEntry, PaneRect } from "../types";
 import { paneLayout, paneResize, agentPrompt, paneSendText, paneSendKeys, agentSendKeys } from "../api";
 import { slashCommandsFor, filterSlashCommands } from "../slash-commands";
-import { IconBook, IconClock, IconSend, IconTerminal } from "./icons";
-import { IconColumns, IconMosaic } from "./icons";
+import { IconBook, IconClock, IconFile, IconSend, IconTerminal } from "./icons";
+import { IconChevron, IconColumns, IconMosaic } from "./icons";
 
 const statusLabel: Record<string, string> = {
   working: "工作中",
@@ -390,7 +390,7 @@ function ChatView() {
             <div className="chat-empty">读取输出失败。窗格可能刚刚关闭，或处于 alternate screen。</div>
           </div>
         ) : output?.text ? (
-          <ChatThread text={output.text} cwd={cwd} cwds={cwds} />
+          <ChatThread text={output.text} cwd={cwd} cwds={cwds} agent={agent} updatedAt={output.updatedAt} />
         ) : output?.loading || status !== "connected" ? (
           <div className="chat-thread" data-testid="chat-thread">
             <div className="chat-empty">正在读取输出…</div>
@@ -405,11 +405,6 @@ function ChatView() {
   );
 }
 
-/** Stable key per block position; parse is deterministic so indices don't shift mid-stream. */
-function blockKey(b: Block, i: number): string {
-  return `${i}:${b.type}`;
-}
-
 function sameBlock(a: Block, b: Block): boolean {
   return (
     a.type === b.type &&
@@ -421,14 +416,175 @@ function sameBlock(a: Block, b: Block): boolean {
   );
 }
 
-function ChatThread({ text, cwd, cwds }: { text: string; cwd: string | null; cwds: string[] }) {
+function ChatThread({
+  text,
+  cwd,
+  cwds,
+  agent,
+  updatedAt,
+}: {
+  text: string;
+  cwd: string | null;
+  cwds: string[];
+  agent: ReturnType<typeof agentForPane>;
+  updatedAt: number;
+}) {
   const blocks = useMemo(() => parseTranscript(text), [text]);
+  const turns = useMemo(() => groupTurns(blocks), [blocks]);
+  // Per-turn collapse state (V5 F1): default expanded; the collapsed turn
+  // keeps only its header row. Keyed by turn index — turns only ever append
+  // while streaming, so indices are stable for existing turns.
+  const [collapsed, setCollapsed] = useState<Set<number>>(() => new Set());
+  const toggleTurn = (i: number) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(i)) next.delete(i);
+      else next.add(i);
+      return next;
+    });
+  };
+  const clock = hhmmss(updatedAt);
   return (
     <div className="chat-thread" data-testid="chat-thread">
-      {blocks.length === 0 && <div className="chat-empty">暂无对话内容。</div>}
-      {blocks.map((b, i) => (
-        <ChatBlock key={blockKey(b, i)} block={b} cwd={cwd} cwds={cwds} />
+      {turns.length === 0 && <div className="chat-empty">暂无对话内容。</div>}
+      {turns.map((turn, ti) => (
+        <ChatTurn
+          key={ti}
+          turn={turn}
+          cwd={cwd}
+          cwds={cwds}
+          agent={agent}
+          clock={clock}
+          collapsed={collapsed.has(ti)}
+          onToggle={() => toggleTurn(ti)}
+        />
       ))}
+    </div>
+  );
+}
+
+/** HH:MM:SS of a wall-clock ms timestamp (turn header "最后更新" time). */
+function hhmmss(ms: number): string {
+  if (!ms) return "";
+  const d = new Date(ms);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+/**
+ * One conversation turn (V5 F1): the user prompt, then a header bar with the
+ * agent avatar + display name + last-updated clock + derived stat chips
+ * (steps / files / duration — only when derivable), then the agent's blocks,
+ * then the per-turn modified-files card. The chevron collapses the whole
+ * agent-produced section down to the header.
+ */
+function ChatTurn({
+  turn,
+  cwd,
+  cwds,
+  agent,
+  clock,
+  collapsed,
+  onToggle,
+}: {
+  turn: Turn;
+  cwd: string | null;
+  cwds: string[];
+  agent: ReturnType<typeof agentForPane>;
+  clock: string;
+  collapsed: boolean;
+  onToggle: () => void;
+}) {
+  const stats = useMemo(() => turnStats(turn), [turn]);
+  const kind = agent?.agent || "agent";
+  const name = agent ? agentDisplayName(agent) || kind : "agent";
+  const initial = (kind[0] ?? "A").toUpperCase();
+  return (
+    <section className="chat-turn" data-testid="chat-turn">
+      {turn.users.map((b, i) => (
+        <ChatBlock key={`u${i}`} block={b} cwd={cwd} cwds={cwds} />
+      ))}
+      <div className="turn-header" data-testid="turn-header">
+        {/* ModelAvatar-style monogram: agent-kind initial + hash hue */}
+        <span className="turn-avatar" style={{ background: `hsl(${hashHue(kind)} 58% 46%)` }} aria-hidden>
+          {initial}
+        </span>
+        <span className="turn-agent">{name}</span>
+        {/* Pane-level last-activity clock (outputs.updatedAt), NOT a
+            per-turn timestamp — labelled so it never reads as "when this
+            turn happened". */}
+        {clock && (
+          <span className="turn-time" title="最后活动：本窗格输出流的最新更新时间">
+            最后活动 {clock}
+          </span>
+        )}
+        {stats.steps > 0 && (
+          <span className="turn-chip" title="本轮工具调用步数">
+            {stats.steps} 步
+          </span>
+        )}
+        {stats.files.length > 0 && (
+          <span className="turn-chip" title="本轮涉及的文件数">
+            {stats.files.length} 文件
+          </span>
+        )}
+        {stats.duration && (
+          <span className="turn-chip" title="本轮耗时">
+            <IconClock size={10} /> {stats.duration}
+          </span>
+        )}
+        <button
+          className={`turn-collapse ${collapsed ? "" : "open"}`}
+          data-testid="turn-collapse"
+          aria-expanded={!collapsed}
+          aria-label={collapsed ? "展开本轮" : "折叠本轮"}
+          title={collapsed ? "展开本轮" : "折叠本轮"}
+          onClick={onToggle}
+        >
+          <IconChevron size={12} />
+        </button>
+      </div>
+      {!collapsed &&
+        turn.body.map((b, bi) => <ChatBlock key={`b${bi}`} block={b} cwd={cwd} cwds={cwds} />)}
+      {!collapsed && stats.files.length > 0 && <TurnFilesCard files={stats.files} />}
+    </section>
+  );
+}
+
+/**
+ * V5 F1 per-turn modified-files card (mcode TurnFilesCard look): folded by
+ * default to one summary line, expandable to the deduplicated file rows.
+ * Directory rows (trailing "/") keep the V4 info tint.
+ */
+function TurnFilesCard({ files }: { files: string[] }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="turn-files-card" data-testid="turn-files-card">
+      <button
+        type="button"
+        className="tfc-head"
+        data-testid="turn-files-toggle"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <IconFile size={13} />
+        <span className="tfc-title">本轮修改 {files.length} 个文件</span>
+        <span className={`tfc-chevron ${open ? "open" : ""}`}>
+          <IconChevron size={11} />
+        </span>
+      </button>
+      {open && (
+        <div className="tfc-rows">
+          {files.map((f) => (
+            <div key={f} className={`turn-file-row${f.endsWith("/") ? " dir" : ""}`} data-testid="turn-file-row" title={f}>
+              <span className="tfc-row-icon">
+                <IconFile size={11} />
+              </span>
+              <span className="tfc-row-path">{f}</span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -462,9 +618,6 @@ const ChatBlock = memo(
           <details
             className="chat-msg tool"
             data-testid="msg-tool"
-            /* A tool block carrying a file listing renders it open: the grid
-               is the block's body, not expandable detail. */
-            open={files.length > 0 || undefined}
           >
             <summary>
               <span className="tool-chip" data-testid="tool-chip" style={{ "--chip-hue": hashHue(block.toolName ?? "tool") } as CSSProperties}>
@@ -472,24 +625,10 @@ const ChatBlock = memo(
               </span>
               <span className="tool-summary">{block.text}</span>
             </summary>
-            {files.length > 0 ? (
-              /* V4 F1: multi-column TUI listing re-laid-out as a uniform grid
-                 (root fix for the ragged terminal columns). */
-              <div className="tool-files" data-testid="tool-files">
-                {files.map((f) => (
-                  <span
-                    key={f}
-                    className={`file-chip${f.endsWith("/") ? " dir" : ""}`}
-                    data-testid="file-chip"
-                    title={f}
-                  >
-                    {f}
-                  </span>
-                ))}
-              </div>
-            ) : (
-              <pre>{block.text}</pre>
-            )}
+            {/* V5 F1: the V4 in-block tool-files grid moved up into the
+               per-turn turn-files-card; the tool block keeps only its chip
+               summary line. The raw body <pre> stays for list-less output. */}
+            {files.length === 0 && <pre>{block.text}</pre>}
             {(block.images ?? []).map((img) => (
               <div className="chat-tool-images" key={img}>
                 <ChatImage path={img} cwd={cwd} cwds={cwds} />

@@ -1,4 +1,5 @@
 import { app, BrowserWindow, ipcMain, Notification, shell } from "electron";
+import { execFile } from "node:child_process";
 import * as path from "node:path";
 import * as fs from "node:fs";
 import {
@@ -290,6 +291,159 @@ function registerIpc(): void {
   ipcMain.handle("fs:open", async (_e, p: string) => {
     return shell.openPath(p);
   });
+
+  // ---- V5 F2: Git app (status / diff via system git) ----
+  ipcMain.handle("git:status", (_e, cwd: string) => runGitStatus(cwd));
+  ipcMain.handle("git:diff", (_e, cwd: string, relPath: string) => runGitDiff(cwd, relPath));
+}
+
+// ---------- V5 F2: Git integration ----------
+//
+// The Git app is DIRECTORY-SCOPED by design: a directory counts as a repository
+// only when it is the repository root itself (it directly contains the `.git`
+// marker — a directory for a normal clone, a file for a worktree/submodule).
+// Plain `git -C <cwd> status` would instead walk UP through parent directories
+// and happily report an unrelated enclosing repo for any nested folder; scoping
+// to the root keeps "该目录不是 Git 仓库" truthful for directories that merely
+// live inside one (this is also the ground truth the E2E fixtures rely on:
+// tests/fixtures sits inside the project repo while fixtures/git-proj is its
+// own repository).
+
+export interface GitStatusEntry {
+  /** index (staged) status letter, " " when none */
+  x: string;
+  /** worktree status letter, " " when none */
+  y: string;
+  /** repo-relative path (rename arrow already resolved to the new path) */
+  path: string;
+}
+
+export type GitStatusResult =
+  | { notRepo: true }
+  | { notRepo?: false; branch: string; entries: GitStatusEntry[] };
+
+const GIT_TIMEOUT_MS = 10_000;
+
+/**
+ * Undo git's C-style path quoting from porcelain output. Paths containing
+ * spaces / quotes / non-ASCII bytes arrive quoted — `?? "sub dir/"` — with
+ * `\"`, `\\`, `\t`, `\n` and `\OOO` octal escapes (`core.quotePath` defaults
+ * to on). Leaving the quotes in would both display them verbatim AND make
+ * `git diff -- "<quoted>"` miss the file (silent "无未暂存改动").
+ */
+function unquoteGitPath(p: string): string {
+  if (p.length < 2 || !p.startsWith('"') || !p.endsWith('"')) return p;
+  const body = p.slice(1, -1);
+  // Decode to raw bytes first (simple escapes → their byte, \OOO → raw UTF-8
+  // byte), then decode the byte sequence as UTF-8 — the inverse of how git
+  // emitted it.
+  const bytes: number[] = [];
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i];
+    if (ch !== "\\") {
+      bytes.push(body.charCodeAt(i) & 0xff);
+      continue;
+    }
+    const next = body[++i];
+    if (next === undefined) break;
+    if (next >= "0" && next <= "7") {
+      let oct = next;
+      while (oct.length < 3 && i + 1 < body.length && body[i + 1] >= "0" && body[i + 1] <= "7") {
+        oct += body[++i];
+      }
+      bytes.push(parseInt(oct, 8) & 0xff);
+      continue;
+    }
+    switch (next) {
+      case "n": bytes.push(10); break;
+      case "t": bytes.push(9); break;
+      case "r": bytes.push(13); break;
+      case '"': bytes.push(34); break;
+      case "\\": bytes.push(92); break;
+      default: bytes.push(body.charCodeAt(i) & 0xff); // unknown escape: keep byte verbatim
+    }
+  }
+  try {
+    return Buffer.from(bytes).toString("utf8");
+  } catch {
+    return body;
+  }
+}
+
+/**
+ * Take the NEW path of a rename entry (`"old name" -> "new name"`), ignoring
+ * ` -> ` sequences that appear inside quoted names.
+ */
+function renameTargetPath(p: string): string {
+  let inQuotes = false;
+  for (let i = 0; i < p.length - 3; i++) {
+    const ch = p[i];
+    if (ch === '"') inQuotes = !inQuotes;
+    else if (!inQuotes && ch === " " && p.startsWith(" -> ", i)) return p.slice(i + 4);
+  }
+  return p;
+}
+
+function runGit(args: string[], cwd: string): Promise<{ stdout: string; code: number }> {
+  return new Promise((resolve) => {
+    execFile(
+      "git",
+      args,
+      { cwd, timeout: GIT_TIMEOUT_MS, windowsHide: true, maxBuffer: 16 * 1024 * 1024 },
+      (err, stdout) => {
+        // exit code survives on err.code for non-zero git exits; anything else
+        // (spawn failure, timeout) degrades to "not a repo" downstream.
+        const code = err && typeof (err as NodeJS.ErrnoException & { code?: unknown }).code === "number"
+          ? ((err as unknown as { code: number }).code)
+          : err
+            ? 1
+            : 0;
+        resolve({ stdout: typeof stdout === "string" ? stdout : "", code });
+      },
+    );
+  });
+}
+
+async function runGitStatus(cwd: string): Promise<GitStatusResult> {
+  if (typeof cwd !== "string" || !cwd) return { notRepo: true };
+  try {
+    fs.accessSync(cwd);
+    fs.accessSync(path.join(cwd, ".git"));
+  } catch {
+    return { notRepo: true };
+  }
+  const { stdout, code } = await runGit(["-C", cwd, "status", "--porcelain=v1", "-b"], cwd);
+  const lines = stdout.split(/\r?\n/).filter((l) => l.length > 0);
+  const head = lines[0] ?? "";
+  // No `##` header line (or git failed / detached-HEAD edge output we can't
+  // parse) → treat as "not a repository we can show".
+  if (code !== 0 || !head.startsWith("##")) return { notRepo: true };
+  let label = head.replace(/^##\s+/, "");
+  // Fresh repo before the first commit: `## No commits yet on main`.
+  const noCommits = label.match(/^No commits yet on (.+)$/);
+  if (noCommits) label = noCommits[1];
+  // Drop the upstream suffix: `## main...origin/main [ahead 1]`.
+  const branch = label.split("...")[0].split(" [")[0].trim();
+  const entries: GitStatusEntry[] = [];
+  for (const line of lines.slice(1)) {
+    const m = line.match(/^(.{2})\s+(.+)$/);
+    if (!m) continue;
+    // C-quoted names ("sub dir/") are unquoted + C-unescaped so both the
+    // display and the `git diff -- <path>` call see the real path.
+    entries.push({ x: m[1][0], y: m[1][1], path: unquoteGitPath(renameTargetPath(m[2])) });
+  }
+  return { branch, entries };
+}
+
+async function runGitDiff(cwd: string, relPath: string): Promise<{ diff: string }> {
+  if (typeof cwd !== "string" || !cwd || typeof relPath !== "string" || !relPath) {
+    return { diff: "" };
+  }
+  // `--` separates paths from options, so a path starting with `-` cannot be
+  // repurposed as a flag; the raw diff text is rendered only through the
+  // escaped <pre> channel in the renderer.
+  const { stdout } = await runGit(["-C", cwd, "diff", "--", relPath], cwd);
+  return { diff: stdout };
 }
 
 // ---------- F2 local file access ----------

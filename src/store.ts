@@ -27,13 +27,25 @@ export interface Toast {
 
 export type LayoutMode = "separate" | "unified";
 
+/** V5 F2: which app the right tool sidebar hosts. */
+export type SidebarApp = "files" | "git";
+
 const LAYOUT_KEY = "herdr-studio-layout-mode";
+const SIDEBAR_APP_KEY = "herdr-studio-sidebar-app";
 
 function readStoredLayoutMode(): LayoutMode {
   try {
     return localStorage.getItem(LAYOUT_KEY) === "unified" ? "unified" : "separate";
   } catch {
     return "separate";
+  }
+}
+
+function readStoredSidebarApp(): SidebarApp {
+  try {
+    return localStorage.getItem(SIDEBAR_APP_KEY) === "git" ? "git" : "files";
+  } catch {
+    return "files";
   }
 }
 
@@ -59,6 +71,18 @@ interface StudioState {
   /** F2: right tool sidebar visibility. */
   rightSidebarOpen: boolean;
   toggleRightSidebar: () => void;
+  /** V5 F2: the app the right sidebar currently hosts (persisted). */
+  sidebarApp: SidebarApp;
+  setSidebarApp: (app: SidebarApp) => void;
+  /**
+   * V5 F2: manual cwd override for the right sidebar apps. Lives in the store
+   * (not component state) so closing the sidebar — which unmounts the panel —
+   * keeps the user's directory choice instead of silently falling back to the
+   * active pane's cwd on reopen. Still reset when the active pane's cwd
+   * changes (following the pane wins over a stale manual pick).
+   */
+  sidebarRoot: string | null;
+  setSidebarRoot: (root: string | null) => void;
   /** Point the main-process output stream at the pane(s) the user is watching. */
   syncPaneStream: () => void;
 
@@ -161,6 +185,7 @@ export const useStore = create<StudioState>((set, get) => ({
 
   layoutMode: readStoredLayoutMode(),
   rightSidebarOpen: false,
+  sidebarApp: readStoredSidebarApp(),
 
   booted: false,
 
@@ -183,6 +208,21 @@ export const useStore = create<StudioState>((set, get) => ({
 
   toggleRightSidebar: () => {
     set((s) => ({ rightSidebarOpen: !s.rightSidebarOpen }));
+  },
+
+  setSidebarApp: (app) => {
+    set({ sidebarApp: app });
+    try {
+      localStorage.setItem(SIDEBAR_APP_KEY, app);
+    } catch {
+      /* non-fatal */
+    }
+  },
+
+  sidebarRoot: null,
+
+  setSidebarRoot: (root) => {
+    set({ sidebarRoot: root });
   },
 
   boot: async () => {

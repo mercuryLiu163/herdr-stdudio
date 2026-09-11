@@ -20,6 +20,12 @@ test.afterEach(async () => {
 // A tiny git repo inside fixtures with one commit + one modified + one new file.
 const GITREPO = path.join(FIXTURES, "git-proj");
 function ensureGitRepo() {
+  // NOTE(test-fix): wipe any previous run's repo AND worktree leftovers before
+  // seeding. `rm -rf .git` alone still lets `add -A` sweep a stale
+  // src/index.js / README.md from the last run into the init commit, which
+  // silently changes the promised status/diff (modified src/index.js +
+  // untracked README.md). Recreating the tree makes every run deterministic.
+  cp.execSync("rm -rf .git src README.md", { cwd: GITREPO, stdio: "ignore", shell: "bash" });
   fs.mkdirSync(path.join(GITREPO, "src"), { recursive: true });
   cp.execSync("git init -b main", { cwd: GITREPO, stdio: "ignore" });
   cp.execSync('git -c user.email=t@t -c user.name=t add -A && git -c user.email=t@t -c user.name=t commit -m init || true', {
