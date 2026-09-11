@@ -38,16 +38,34 @@
  *          with ≥2 whitespace-separated file-name-ish tokens each) is folded
  *          into the tool block's `files` so the UI can re-layout it as a CSS
  *          grid — the ragged TUI columns never render as-is.
+ *
+ * V6 F2 additions (parse quality — prose is never a tool, TUI is never text):
+ *        - a leading TUI tree/box-drawing prefix (`└ ┌ │ ├` glyphs plus `──`
+ *          connector runs and the spaces between them) is stripped BEFORE
+ *          classification, so `└ Set model to …` classifies as plain
+ *          assistant prose and no tree glyph ever reaches a block;
+ *        - a marker line (`⏺ ● • ◆`) is only a tool call when its remaining
+ *          text validates as one: the `Name(…)` call form always does;
+ *          otherwise the first word group must be ≤3 words and must not start
+ *          with a sentence-starter word ("Looks/It/The…" → the whole line is
+ *          assistant prose, marker glyph stripped). The tool summary comes
+ *          only from the marker line itself; following marker-less natural
+ *          lines flow back into the assistant stream (except V4 file
+ *          listings / code fences, which keep their dedicated handling).
  */
 
 export type BlockType = "user" | "assistant" | "tool" | "code" | "meta" | "thinking";
 
 export interface Block {
   type: BlockType;
-  /** user: typed text · assistant: markdown source · tool: full body · code: verbatim · thinking: duration label */
+  /** user: typed text · assistant: markdown source · tool: full body (detail view) · code: verbatim · thinking: duration label */
   text: string;
   /** tool blocks: the tool identifier shown in the chip */
   toolName?: string;
+  /** tool blocks: one-line row summary (call-form argument; = text when the
+   *  body is not a `Name(args)` call). The row shows this, the expanded
+   *  detail shows the full `text` (review m1). */
+  summary?: string;
   /** code blocks: fence language (lower-cased), "" when absent */
   lang?: string;
   /** assistant / tool blocks: image paths extracted out of `text` */
@@ -172,6 +190,65 @@ function isFooterLine(line: string): boolean {
 }
 
 /**
+ * Leading TUI tree/box-drawing prefix (V6 F2): `└ ┌ │ ├ │`-family glyphs plus
+ * `──` connector runs and the whitespace between them — and (review M2) the
+ * Claude Code result glyphs `⎿ ⏋ ⏌`, so a tool's result line
+ * (`⎿  Updated … with 3 additions`) strips to plain assistant text instead of
+ * leaking the glyph into the stream. Stripped from the line BEFORE
+ * classification so the remainder classifies by its own content.
+ * Deliberately excludes prose punctuation (em/en dash, `▸`, `✻`, `›`) so real
+ * content is never eaten.
+ */
+const TREE_PREFIX_RE = /^[└┌┐┘│┝┠┣├┤┬┴┼╭╮╯╰╔╗╚╝╠╣╦╩╬═║─┄┅┆┇┈┉┊⎾⎿⏋⏌\s]+/;
+
+/**
+ * A tool-call marker line (V6 F2): one of the `⏺ ● • ◆` glyphs followed by the
+ * line's remaining text. The marker alone is not enough — see
+ * {@link validToolCall}.
+ */
+const TOOL_MARKER_RE = /^[⏺●•◆]\s?(.*)$/;
+
+/**
+ * Sentence-starter words that can never begin a tool name (V6 F2): agent prose
+ * written next to a bullet glyph ("● Looks like a test …") must fall back to
+ * the assistant stream, not masquerade as a tool named "Looks".
+ */
+const SENTENCE_STARTER_WORDS = new Set([
+  "a", "all", "also", "am", "an", "and", "any", "are", "as", "at", "be", "been",
+  "being", "both", "but", "by", "can", "could", "did", "do", "does", "done",
+  "each", "either", "every", "feel", "felt", "for", "from", "get", "got", "had",
+  "has", "have", "he", "her", "here", "hers", "him", "his", "how", "i", "if",
+  "in", "is", "it", "its", "just", "let", "looks", "may", "me", "might", "must",
+  "my", "no", "not", "now", "of", "oh", "on", "one", "only", "or", "other",
+  "our", "ours", "please", "seems", "shall", "she", "should", "so", "some",
+  "sorry", "sure", "than", "that", "the", "their", "them", "then", "there",
+  "these", "they", "this", "those", "to", "up", "us", "was", "we", "were",
+  "what", "when", "where", "which", "who", "whom", "whose", "why", "will",
+  "with", "would", "yes", "yet", "you", "your", "yours",
+]);
+
+/**
+ * Validate the text after a tool marker as an actual tool call (V6 F2).
+ * Returns the validated tool name, or null when the line is prose:
+ *  - the `Name(…)` call form (identifier + open paren) always validates —
+ *    that is how every real TUI renders a structured invocation;
+ *  - otherwise the first word group must be ≤3 words AND its leading word
+ *    must not be a sentence-starter, so "● Looks like a test …" (9 words,
+ *    sentence-starter) and "● This is fine" fall back to assistant prose.
+ * The derived name loses trailing punctuation (review m3): `● Done.` chips
+ * as "Done", not "Done.".
+ */
+function validToolCall(rest: string): string | null {
+  const call = rest.match(/^([A-Za-z_][\w.+-]*)\s*\(/);
+  if (call) return call[1];
+  const words = rest.split(/\s+/).filter(Boolean);
+  if (words.length === 0 || words.length > 3) return null;
+  if (SENTENCE_STARTER_WORDS.has(words[0].toLowerCase())) return null;
+  const name = toolNameOf(rest).replace(/[.,;:!?)\]}…。！？；：、"'”’]+$/, "");
+  return name || null;
+}
+
+/**
  * File/directory-name-ish token: short, restricted charset (internal `/`
  * allowed for nested paths like `src/a.ts`), and carrying a file-name
  * feature — a `.<ext>` suffix or a trailing `/` (directory).
@@ -278,14 +355,18 @@ export function parseTranscript(text: string): Block[] {
 
   for (const raw of lines) {
     const line = raw.trimEnd();
-    const trimmed = line.trim();
 
     // Inside a fenced code block: collect verbatim until the closing fence.
     if (codeBuf !== null) {
-      if (/^```/.test(trimmed)) flushCode();
+      if (/^```/.test(line.trim())) flushCode();
       else codeBuf.lines.push(line);
       continue;
     }
+
+    // V6 F2: strip a leading TUI tree/box-drawing prefix (`└ Set model to …`,
+    // `│ …`, `├── …`) BEFORE classification — tree glyphs never reach a block
+    // and the remainder classifies by its own content.
+    const trimmed = line.replace(TREE_PREFIX_RE, "").trim();
 
     // Collapse blank runs.
     if (!trimmed) continue;
@@ -350,19 +431,34 @@ export function parseTranscript(text: string): Block[] {
       continue;
     }
 
-    // Tool-call markers: ⏺ / ● / •
-    const tool = trimmed.match(/^[⏺●]\s?(.*)$/) ?? trimmed.match(/^•\s+(.*)$/);
+    // Tool-call marker line (V6 F2): the marker alone is NOT a tool — the
+    // remaining text must validate as one (call form / short non-sentence
+    // word group). Rejected marker lines are prose: their text (marker glyph
+    // stripped) flows back into the assistant stream.
+    const tool = trimmed.match(TOOL_MARKER_RE);
     if (tool) {
-      flushAssistant();
       const body = (tool[1] ?? "").trim();
-      fileCtx = null;
-      if (body) {
-        const { text: summary, images } = extractImagePaths(body);
-        const block: Block = { type: "tool", text: summary || body, toolName: toolNameOf(body) };
-        if (images.length) block.images = images;
-        blocks.push(block);
-        fileCtx = block; // a listing may follow the call line
+      if (!body) continue; // bare marker with no payload: decoration — drop
+      const toolName = validToolCall(body);
+      if (toolName === null) {
+        // Prose next to a bullet glyph → assistant text, marker stripped.
+        fileCtx = null;
+        assistantBuf.push(body);
+        continue;
       }
+      flushAssistant();
+      // V6 F2 / review m1: the ROW shows the call-form argument ("npm run
+      // build"), the expanded detail shows the full `Name(args)` body —
+      // never "Bash(Bash…)" twice. Non-call forms: both carry the body.
+      const call = body.match(/^[A-Za-z_][\w.+-]*\s*\((.*)\)\s*$/);
+      const rowSrc = call ? (call[1].trim() || body) : body;
+      const { text: summary, images } = extractImagePaths(rowSrc);
+      // Image paths pulled out of the row must not reappear in the detail.
+      const { text: detail } = images.length ? extractImagePaths(body) : { text: body };
+      const block: Block = { type: "tool", text: detail, toolName, summary: summary || body };
+      if (images.length) block.images = images;
+      blocks.push(block);
+      fileCtx = block; // a listing may follow the call line
       continue;
     }
 

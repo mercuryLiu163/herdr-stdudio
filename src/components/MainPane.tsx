@@ -410,6 +410,9 @@ function sameBlock(a: Block, b: Block): boolean {
     a.type === b.type &&
     a.text === b.text &&
     a.toolName === b.toolName &&
+    // review m1: the row summary is now a separate field — a streaming change
+    // that only alters it must still repaint the row.
+    a.summary === b.summary &&
     a.lang === b.lang &&
     (a.images ?? []).join("\n") === (b.images ?? []).join("\n") &&
     (a.files ?? []).join("\n") === (b.files ?? []).join("\n")
@@ -613,22 +616,30 @@ const ChatBlock = memo(
           </div>
         );
       case "tool": {
+        // V6 F1 (mcode GenericToolCard look): the tool block is a quiet
+        // single-line activity row — 8px hash-hued dot + 12px colored tool
+        // name + 13px gray summary + chevron — no border, no banner box. The
+        // row shows `summary` (call-form argument); the expanded detail shows
+        // the full `text` body under a 2px indent guide (review m1). The
+        // `--chip-hue` var is set HERE (not on the chip) so both the dot and
+        // the name draw the same hash hue.
         const files = block.files ?? [];
         return (
-          <details
-            className="chat-msg tool"
-            data-testid="msg-tool"
-          >
+          <details className="chat-msg tool" data-testid="msg-tool" style={{ "--chip-hue": hashHue(block.toolName ?? "tool") } as CSSProperties}>
             <summary>
-              <span className="tool-chip" data-testid="tool-chip" style={{ "--chip-hue": hashHue(block.toolName ?? "tool") } as CSSProperties}>
-                <span className="tool-chip-name">{block.toolName ?? "tool"}</span>
+              <span className="tool-dot" aria-hidden />
+              <span className="tool-chip" data-testid="tool-chip">
+                {block.toolName ?? "tool"}
               </span>
-              <span className="tool-summary">{block.text}</span>
+              <span className="tool-summary">{block.summary ?? block.text}</span>
+              <span className="tool-chevron" aria-hidden>
+                <IconChevron size={11} />
+              </span>
             </summary>
             {/* V5 F1: the V4 in-block tool-files grid moved up into the
                per-turn turn-files-card; the tool block keeps only its chip
                summary line. The raw body <pre> stays for list-less output. */}
-            {files.length === 0 && <pre>{block.text}</pre>}
+            {files.length === 0 && <pre className="tool-detail">{block.text}</pre>}
             {(block.images ?? []).map((img) => (
               <div className="chat-tool-images" key={img}>
                 <ChatImage path={img} cwd={cwd} cwds={cwds} />

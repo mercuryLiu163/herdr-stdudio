@@ -20,7 +20,7 @@ async function seedAgent() {
   await api.paneSendInput(
     sock,
     pane2.pane_id,
-    'echo "\u276f \u5e2e\u6211\u68c0\u67e5\u76ee\u5f55"; echo "Thought for 4s (ctrl+o to expand)"; echo "\u23fa List(config)"; echo "batch_process_cameras.py    build-and-serve-https.bat    cam29_data/"; echo "docs/    frontend/    package.json"; echo "\u273b Baked for 28s"; echo "\u25b8\u25b8 bypass permissions on (shift+tab to cycle) \u2190 for agents"',
+    'echo "\u276f \u5e2e\u6211\u68c0\u67e5\u76ee\u5f55"; echo "Thought for 4s (ctrl+o to expand)"; echo "\u23fa List(config)"; echo "batch_process_cameras.py    build-and-serve-https.bat    cam29_data/"; echo "docs/    frontend/    package.json"; echo "\u68c0\u67e5\u5b8c\u6210\uff0c\u4e00\u5207\u6b63\u5e38\u3002"; echo "\u273b Baked for 28s"; echo "\u25b8\u25b8 bypass permissions on (shift+tab to cycle) \u2190 for agents"',
   );
   await api.paneReportAgent(sock, pane2.pane_id, "e2e-fake", "working");
   const { page } = ctx;
@@ -112,8 +112,16 @@ test.describe("F1 normalized transcript", () => {
         { timeout: 10_000 },
       )
       .toBeGreaterThanOrEqual(2);
+    // NOTE(test-fix): V6 (docs/plans/2026-09-12-v6-prd.md, 背景诊断 #6) turns
+    // the user bubble into the one RIGHT-aligned element of the stream
+    // (neutral surface, max-width 72%), superseding the V4 uniform-left
+    // contract for msg-user. The uniform indent check now covers the
+    // left-aligned transcript blocks; the seed gained an assistant line
+    // ("检查完成，一切正常。") so two such blocks are measured.
     const offsets = await page.evaluate(() => {
-      const blocks = [...document.querySelectorAll("[data-testid^='msg-']")];
+      const blocks = [
+        ...document.querySelectorAll("[data-testid^='msg-']:not([data-testid='msg-user'])"),
+      ];
       return blocks.map((b) => b.getBoundingClientRect().left);
     });
     expect(offsets.length).toBeGreaterThanOrEqual(2);

@@ -100,9 +100,12 @@
 
   /* V4 F1 chat typography scale — every chat block type (user/assistant/
      tool/code/thinking/meta) draws its spacing from this single variable set;
-     no block may hardcode its own indent/gap (review item). */
-  --chat-gap: 12px; /* vertical rhythm between blocks */
-  --chat-turn-gap: 24px; /* V5 F1: vertical rhythm between turns (> blocks) */
+     no block may hardcode its own indent/gap (review item).
+     V6 F1: tightened to the reference "continuous document" rhythm — turn
+     gap 18px, block gap 10px, turn header sits 6px above its body (the
+     header recovers the missing 4px via a negative margin). */
+  --chat-gap: 10px; /* vertical rhythm between blocks */
+  --chat-turn-gap: 18px; /* V5 F1: vertical rhythm between turns (> blocks) */
   --chat-indent: 20px; /* the one fixed nesting indent step */
   --chat-block-x: 12px; /* inner horizontal padding of framed blocks */
 }
@@ -828,30 +831,44 @@ html[data-theme="light"] .titlebar-btn .icon-moon {
 }
 
 /* V4 F1: every msg-* block shares the same left baseline (uniform indent).
-   The user bubble is left-aligned like all other block types; its bubble box
-   hugs its content instead of floating to the opposite edge. */
+   V6 F1 exception — the user bubble is the one right-aligned element of the
+   stream (reference ChatPane: `flex justify-end`, neutral surface, 72%). */
 .chat-msg.user {
-  align-self: flex-start;
+  align-self: flex-end;
+  max-width: 72%;
 }
 
+/* V6 F1: user bubble neutralised — surface-raised background (no accent
+   tint, no colored border), UI font 13.5px, soft 14px radius. */
 .chat-bubble {
-  background: var(--accent-soft);
-  border: 1px solid var(--accent-border);
+  background: var(--surface-raised);
+  border: none;
   color: var(--text);
-  /* derived from the shared chat scale (review M1): 9px / 12px */
-  padding: calc(var(--chat-gap) * 0.75) var(--chat-block-x);
-  border-radius: 16px 16px 4px 16px;
+  padding: 8px 12px;
+  border-radius: 14px;
   white-space: pre-wrap;
   word-break: break-word;
+  font-family: var(--font-ui);
   font-size: 13.5px;
   line-height: 1.6;
   width: fit-content;
   max-width: 100%;
 }
+/* Review M1: in the light theme --surface-raised is #ffffff, same as --bg —
+   the bubble would vanish. A slightly deeper surface plus a neutral hairline
+   keeps it visible without reintroducing a colored border. */
+html[data-theme="light"] .chat-bubble {
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
 
 .chat-msg.assistant {
   align-self: flex-start;
+  max-width: 100%;
   color: var(--text);
+  /* V6 F1 font layering: assistant prose is UI sans — monospace is reserved
+     for code/pre/diff/file-path chips inside .chat-md. */
+  font-family: var(--font-ui);
   white-space: pre-wrap;
   word-break: break-word;
   /* V5 F1 typography (reference screenshot): 14px prose, roomy leading. */
@@ -859,45 +876,87 @@ html[data-theme="light"] .titlebar-btn .icon-moon {
   line-height: 1.75;
 }
 
+/* V6 F1: the tool block is a quiet single-line ACTIVITY ROW (mcode
+   GenericToolCard) — 8px hash-hued dot + 12px colored tool name + 13px gray
+   summary + right chevron. No border, no banner background; only a faint
+   wash on hover. Clicking expands a detail area under a 2px indent guide;
+   the row itself never carries the body. */
 .chat-msg.tool {
   align-self: stretch;
   max-width: 100%;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--wash-1);
-  font-family: var(--font-mono);
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  font-family: var(--font-ui);
   font-size: 12px;
 }
 .chat-msg.tool summary {
   cursor: pointer;
-  padding: 8px var(--chat-block-x);
+  padding: 4px 8px;
+  border-radius: 8px;
   color: var(--text-dim);
   list-style: none;
   display: flex;
   gap: 8px;
-  align-items: baseline;
-  white-space: pre-wrap;
-  word-break: break-word;
+  align-items: center;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
 }
 .chat-msg.tool summary::-webkit-details-marker {
   display: none;
 }
-.chat-msg.tool pre {
-  margin: 0;
-  padding: 0 var(--chat-block-x) 10px;
+.chat-msg.tool summary:hover {
+  background: var(--wash-1);
+}
+.tool-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: hsl(var(--chip-hue) 62% 55%);
+  flex-shrink: 0;
+}
+.tool-chip {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  color: hsl(var(--chip-hue) 70% 58%);
+  flex-shrink: 0;
+  font-family: var(--font-ui);
+}
+.tool-summary {
+  min-width: 0;
+  flex: 1;
+  font-size: 13px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tool-chevron {
+  display: inline-flex;
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+.tool-chevron svg {
+  transition: transform 0.14s ease;
+  transform: rotate(0deg); /* closed: chevron points right */
+}
+.chat-msg.tool[open] .tool-chevron svg {
+  transform: rotate(90deg); /* expanded: chevron points down */
+}
+/* Expanded detail: content indented under a 2px guide line, visually
+   nested beneath the row (mono allowed here — it is a <pre>). */
+.chat-msg.tool pre,
+.chat-msg.tool .tool-detail {
+  margin: 2px 0 6px 7px;
+  padding: 2px 0 2px 10px;
+  border-left: 2px solid var(--border-strong);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
   white-space: pre-wrap;
   word-break: break-word;
   color: var(--text-faint);
-}
-
-.chat-tool-tag {
-  font-size: 10px;
-  padding: 1px 7px;
-  border-radius: 999px;
-  background: var(--wash-3);
-  color: var(--text-faint);
-  letter-spacing: 0.4px;
-  flex-shrink: 0;
 }
 
 .chat-msg.code {
@@ -914,14 +973,15 @@ html[data-theme="light"] .titlebar-btn .icon-moon {
   color: var(--text-dim);
 }
 
+/* V4 F1 → V6 F1: status line as a weak centered text row. The old dashed
+   pill border is gone (no boxes in the stream); the divider weight lives in
+   the faint color and the halved padding. */
 .chat-meta {
   align-self: center;
+  font-family: var(--font-ui);
   font-size: 11px;
   color: var(--text-faint);
-  /* derived from the shared chat scale (review M1): 2px / 12px */
-  padding: calc(var(--chat-gap) / 6) var(--chat-block-x);
-  border: 1px dashed var(--border-strong);
-  border-radius: 999px;
+  padding: calc(var(--chat-gap) / 10) 0;
 }
 
 /* V4 F1: collapsed thinking row — weakened, expandable, full width so its
@@ -966,27 +1026,32 @@ html[data-theme="light"] .titlebar-btn .icon-moon {
   line-height: 1.6;
 }
 
-/* V5 F1: turn header bar — avatar monogram + agent name + clock + stat chips
-   + collapse chevron. Neutral washes only; the avatar carries the hash hue. */
+/* V5 F1 → V6 F1: turn header as a borderless inline row (mcode 无框台账) —
+   20px avatar monogram + agent name + clock + faint stat text + collapse
+   chevron, hugging the body below it. No border, no background: the header
+   IS a quiet meta line, not a card. The negative bottom margin narrows the
+   gap to the body from --chat-gap (10px) to the promised 6px. */
 .turn-header {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 5px 10px;
-  background: var(--wash-1);
-  border: 1px solid var(--border);
-  border-radius: 10px;
+  padding: 2px 0;
+  margin-bottom: -4px;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  font-family: var(--font-ui);
   font-size: 12px;
   color: var(--text-dim);
   min-width: 0;
 }
 .turn-avatar {
-  width: 18px;
-  height: 18px;
-  border-radius: 6px;
+  width: 20px;
+  height: 20px;
+  border-radius: 7px;
   display: grid;
   place-items: center;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
   color: var(--on-accent);
   flex-shrink: 0;
@@ -998,22 +1063,26 @@ html[data-theme="light"] .titlebar-btn .icon-moon {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* V6 F1 font layering: the whole header row is UI sans; tabular figures
+   keep the clock steady. */
 .turn-time {
-  font-family: var(--font-mono);
+  font-family: var(--font-ui);
+  font-variant-numeric: tabular-nums;
   font-size: 11px;
   color: var(--text-faint);
   flex-shrink: 0;
 }
+/* Stat text (V6 F1): plain faint text instead of bordered chips — the turn
+   header must not read as a row of little boxes. */
 .turn-chip {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  font-size: 10.5px;
-  padding: 1px 8px;
-  border-radius: 999px;
-  background: var(--wash-3);
-  border: 1px solid var(--border);
-  color: var(--text-dim);
+  font-size: 11px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  color: var(--text-faint);
   flex-shrink: 0;
   white-space: nowrap;
 }
@@ -1235,8 +1304,10 @@ html[data-theme="light"] .titlebar-btn .icon-moon {
 .chat-md h1,
 .chat-md h2,
 .chat-md h3 {
-  font-family: var(--font-serif);
-  font-weight: 500;
+  /* V6 F1 font layering: headings belong to the assistant prose layer —
+     UI sans, weight-stepped (was serif). */
+  font-family: var(--font-ui);
+  font-weight: 600;
   margin: 10px 0 6px;
   line-height: 1.3;
 }
@@ -1325,29 +1396,13 @@ code.hljs .hljs-deletion {
   background: var(--hljs-deletion-bg);
 }
 
-/* Colored tool chip (hue derived from the tool name hash) */
-.tool-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 1px 9px;
-  border-radius: 999px;
-  font-size: 10.5px;
-  font-weight: 600;
-  letter-spacing: 0.3px;
-  font-family: var(--font-mono);
-  flex-shrink: 0;
-  background: hsl(var(--chip-hue) 65% 50% / 0.14);
-  color: hsl(var(--chip-hue) 70% 48%);
-  border: 1px solid hsl(var(--chip-hue) 65% 50% / 0.38);
-}
-.tool-summary {
-  min-width: 0;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
+/* Colored tool name (V6 F1): plain hash-hued text on the activity row — the
+   old pill chrome (background/border/padding) is gone. Hue + size live in
+   .tool-chip above; nothing else styles it. */
 .chat-tool-images {
-  padding: 0 var(--chat-block-x) 10px;
+  margin: 2px 0 6px 7px;
+  padding: 0 0 2px 10px;
+  border-left: 2px solid var(--border-strong);
 }
 
 /* Inline transcript image (loaded through fs:read data URL).
