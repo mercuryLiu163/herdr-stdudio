@@ -281,7 +281,9 @@ export const useStore = create<StudioState>((set, get) => ({
         set({ activeWorkspaceId: wsId, activeTabId: tabId, activePaneId: paneId });
       }
       const finalPaneId = paneId;
-      if (finalPaneId) void get().refreshPaneOutput(finalPaneId);
+      // Stream already polls pane.read; don't re-fetch (and toggle loading)
+      // on every snapshot — that re-parses the whole transcript and stutters.
+      if (finalPaneId && !get().outputs[finalPaneId]?.text) void get().refreshPaneOutput(finalPaneId);
       // Keep the unified-mode stream set current with pane create/close events
       // (no-op when the id set didn't change).
       get().syncPaneStream();
@@ -341,14 +343,15 @@ export const useStore = create<StudioState>((set, get) => ({
   },
 
   refreshPaneOutput: async (paneId) => {
-    set((s) => ({
-      outputs: {
-        ...s.outputs,
-        [paneId]: s.outputs[paneId]
-          ? { ...s.outputs[paneId], loading: true }
-          : { text: "", revision: -1, updatedAt: 0, loading: true },
-      },
-    }));
+    const existing = get().outputs[paneId];
+    if (!existing?.text) {
+      set((s) => ({
+        outputs: {
+          ...s.outputs,
+          [paneId]: { text: "", revision: -1, updatedAt: 0, loading: true },
+        },
+      }));
+    }
     try {
       const { read } = await api.paneRead(paneId);
       set((s) => {

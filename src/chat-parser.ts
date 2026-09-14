@@ -52,6 +52,30 @@
  *          only from the marker line itself; following marker-less natural
  *          lines flow back into the assistant stream (except V4 file
  *          listings / code fences, which keep their dedicated handling).
+ *
+ * V7 F1 additions (user prompt as a markdown card, not a TUI line):
+ *        - after a `❯` / shell user line, structural continuation lines
+ *          (markdown lists, `URL:` labels, bare http(s) URLs, indented wraps)
+ *          are appended to that same user block so the UI can re-layout them
+ *          as a collapsible card. A tool / meta / thinking / new user / fence
+ *          always closes the continuation.
+ *
+ * V7 F4 additions (ZCODE / product TUI chrome is never conversation):
+ *        - `◆ ZCODE v…` banner, welcome box (`Ask a task…`, `/help commands`,
+ *          `path · branch` chip), update nags, and the model/ctx/cache
+ *          status footer are dropped;
+ *        - `[ ✓ 5s ]` is a duration meta line (turn pill), not prose;
+ *        - `looksLikeChat` is true when a shell transcript is actually a
+ *          conversation (so 分屏 defaults to the chat view, not the TUI dump).
+ *
+ * V8 additions (Grok Build TUI):
+ *        - splash / braille-art welcome (`Grok Build 1.0.30`, `/feedback`,
+ *          `New worktree ctrl+w`, empty `❯` prompt box) is dropped, never
+ *          assistant prose;
+ *        - `Grok 4.6 (medium) · always-approve` is session chrome (composer
+ *          status), not a chat block — see {@link extractComposerStatus};
+ *        - trailing TUI clocks (`1:14 AM`) and box-drawing leftovers on
+ *          user rows are stripped.
  */
 
 export type BlockType = "user" | "assistant" | "tool" | "code" | "meta" | "thinking";
@@ -117,8 +141,9 @@ function isEchoChain(rest: string): boolean {
  */
 function extractUserInput(line: string): string | null {
   const classify = (rest: string) => {
-    const t = rest.trim();
+    const t = sanitizeUserText(rest);
     if (t && isEchoChain(t)) return ""; // echo chain = shell noise, drop line
+    if (/^\^C$/i.test(t)) return "";
     return t;
   };
 
@@ -152,12 +177,31 @@ function extractUserInput(line: string): string | null {
  * ("4s"), or "" when the line carries no duration; null when not a thinking
  * line.
  */
+const COOK_ORNAMENT = /^[◆❖♦◇⬥*✽※✻✦]\s*/;
+const COOKING_RE =
+  /^(?:[◆❖♦◇⬥*✽※✻✦]\s*)?(Kneading|Whisking|Frosting|Baking|Simmering|Saut[eé]ing|Mixing|Blending|Brewing|Crunching|Distilling|Noodling|Percolating|Accomplishing)\b/i;
+
+export function cookingOf(line: string): { duration: string | null; done: boolean } | null {
+  const stripped = line.replace(COOK_ORNAMENT, "").trim();
+  if (!COOKING_RE.test(line.trim()) && !COOKING_RE.test(stripped)) return null;
+  const dur = line.match(/([\d.]+)\s*s/);
+  const done = /thinking\s*\)/i.test(line) || /stop hook/i.test(line) || !!dur;
+  return { duration: dur ? `${dur[1]}s` : null, done };
+}
+
 export function thinkingOf(line: string): string | null {
+  const cook = cookingOf(line);
+  if (cook) return cook.duration ?? "";
+  const stripped = line.replace(COOK_ORNAMENT, "").trim();
   let m =
-    line.match(/^thought\s+for\s+([\d.]+)\s*s\b[^()]*\(ctrl\+o to expand\)\s*$/i) ??
-    line.match(/^thought\s+for\s+([\d.]+)\s*s\b[^()]*$/i);
+    stripped.match(/^thought\s+for\s+([\d.]+)\s*s/i) ??
+    stripped.match(/^thinking\s+for\s+([\d.]+)\s*s/i);
   if (m) return `${m[1]}s`;
-  m = line.match(/^thinking\b[^()]*\(ctrl\+o to expand\)\s*$/i) ?? line.match(/^thinking(?:…|\.\.\.)?\s*$/i);
+  m =
+    stripped.match(/^thinking\b.*ctrl\s*\+\s*o to expand/i) ??
+    stripped.match(/^thinking(?:…|\.\.\.)?\s*$/i) ??
+    stripped.match(/^thought\b.*ctrl\s*\+\s*o to expand/i) ??
+    stripped.match(/^thought\b/i);
   if (m) return "";
   return null;
 }
@@ -168,6 +212,8 @@ export function thinkingOf(line: string): string | null {
  * from the returned label. Null when the line is not a meta status line.
  */
 export function metaOf(line: string): string | null {
+  const zcodeDur = line.match(/^\[\s*[✓✔√]\s*([\d.]+)\s*s\s*\]$/);
+  if (zcodeDur) return `${zcodeDur[1]}s`;
   const m =
     line.match(/^[✻※]?\s*(?:worked|baked)\s+for\s+[\d.]+\s*s\b[^;]*$/i) ??
     line.match(/^[✻※…]\s*\S.*\bin\s+[\d.]+\s*s\.?$/i);
@@ -181,12 +227,192 @@ export function metaOf(line: string): string | null {
  */
 const FOOTER_RES: RegExp[] = [
   /^▸/, // herdr/claude status bar arrows: "▸▸ bypass permissions on …"
-  /^\(?\? for shortcuts\)?/i, // key hint footer
-  /shift\+tab to cycle/i, // permission-mode line
+  /^⏵/, // filled triangle variant seen in live Claude TUI
+  /^\(?\? for shortcuts\)?/i,
+  /shift\+tab to cycle/i,
+  /shift\s*\+\s*tab:mode/i,
+  /ctrl\s*\+\s*x:shortcuts/i,
+  /bypass permissions/i,
 ];
 
 function isFooterLine(line: string): boolean {
   return FOOTER_RES.some((re) => re.test(line));
+}
+
+/**
+ * Product / TUI chrome that must never become a user/tool/assistant block
+ * (ZCODE welcome box, update nag, model status footer).
+ */
+export function isChromeLine(line: string): boolean {
+  if (/^[◆❖♦◇⬥]?\s*ZCODE\b/i.test(line)) return true;
+  if (/\bctx\s+\d+%/i.test(line) && /\bcache\s+\d+%/i.test(line)) return true;
+  if (/^Ask a task about this workspace/i.test(line)) return true;
+  if (/^\/help commands/i.test(line)) return true;
+  if (/update available/i.test(line)) return true;
+  if (/^Run npm install -g /i.test(line)) return true;
+  if (/^Release notes:?$/i.test(line)) return true;
+  if (/zcode-cli\/releases/i.test(line)) return true;
+  if (/^[A-Za-z]:[\\/][^\n]*·/.test(line)) return true;
+  if (/^(?:to\s+)?expand\)?$/i.test(line)) return true;
+  if (/^[\s)]+$/.test(line)) return true;
+  // Claude Code splash / env nag
+  if (/CLAUDE_CODE_[A-Z0-9_]+/.test(line)) return true;
+  if (/UNKNOWN_MODEL_WINDOW_ENFORCEMENT/.test(line)) return true;
+  if (/API Usage Billing/i.test(line)) return true;
+  if (/Claude Code v?\d/i.test(line)) return true;
+  if (/wait-for-the-API behavior/i.test(line)) return true;
+  if (/to make it take effect/i.test(line)) return true;
+  if (/^Your Windows\b/i.test(line)) return true;
+  if (/running stop hook/i.test(line)) return true;
+  if (/^[\u2580-\u259F█▓▒░■◼▪]/.test(line) && (line.match(/[\u2580-\u259F█▓▒░]/g) ?? []).length >= 3) return true;
+  if (/^[A-Za-z]:[\\/][^\s│]+$/.test(line)) return true;
+  if (/^Token usage:/i.test(line)) return true;
+  if (/To continue this session, run /i.test(line)) return true;
+  if (/^Tip: You can launch Claude Code/i.test(line)) return true;
+  // Grok Build splash / empty prompt chrome (never conversation).
+  if (/\bGrok Build\b/i.test(line)) return true;
+  if (/Thanks for trying Grok Build/i.test(line)) return true;
+  if (/give feedback with\s*\/feedback/i.test(line)) return true;
+  if (/New worktree/i.test(line) && /ctrl\s*\+\s*w/i.test(line)) return true;
+  if (/Resume session/i.test(line) && /ctrl\s*\+\s*[rn]/i.test(line)) return true;
+  if (/^Quit\s+ctrl\s*\+\s*q/i.test(line)) return true;
+  if (/\bGrok\s+[\d.]+\b/i.test(line) && /always-approve|plan mode|\(medium\)|\(low\)|\(high\)/i.test(line))
+    return true;
+  if (/\b\d+(?:\.\d+)?K\s*\/\s*\d+(?:\.\d+)?K\b/.test(line) && /\[Dashboard\]/i.test(line)) return true;
+  if (/^\[Dashboard\]/i.test(line)) return true;
+  if (/user_prompt_submit hook/i.test(line)) return true;
+  if (isGarbledArt(line)) return true;
+  if (/^[█░▒▓\s]+$/.test(line)) return true;
+  if (/^[▼▲◀▶]+$/.test(line)) return true;
+  return false;
+}
+
+/**
+ * Grok's welcome screen is braille / box-drawing art. After ANSI strip it
+ * becomes a soup of ⣿ / ░ / scattered punctuation — never assistant prose.
+ */
+function isGarbledArt(line: string): boolean {
+  const braille = (line.match(/[\u2800-\u28FF]/g) ?? []).length;
+  if (braille >= 4) return true;
+  const boxes = (line.match(/[\u2500-\u257F█▓▒░■]/g) ?? []).length;
+  const letters = (line.match(/[A-Za-z\u4e00-\u9fff]/g) ?? []).length;
+  if (boxes >= 8 && letters < 8) return true;
+  return false;
+}
+
+/** Trailing TUI clocks / box-drawing leftovers on a user prompt row. */
+function sanitizeUserText(rest: string): string {
+  let t = rest.trim();
+  t = t.replace(/[\s\u2500-\u257F\u2580-\u259F]+$/g, "").trim();
+  t = t.replace(/\s+\d{1,2}:\d{2}\s*[APap][Mm]\s*$/g, "").trim();
+  t = t.replace(/[\s\u2500-\u257F]+$/g, "").trim();
+  if (!t || /^[\u2500-\u257F|]+$/.test(t)) return "";
+  return t;
+}
+
+export interface ComposerStatus {
+  model?: string;
+  /** reasoning effort: low | medium | high | xhigh */
+  effort?: string;
+  mode?: string;
+  /** context window used, e.g. "2.3%" */
+  ctx?: string;
+}
+
+function unitToNum(n: string, unit: string): number {
+  const v = parseFloat(n);
+  if (!Number.isFinite(v)) return 0;
+  const u = unit.toUpperCase();
+  if (u === "B") return v * 1e9;
+  if (u === "M") return v * 1e6;
+  if (u === "K") return v * 1e3;
+  return v;
+}
+
+/**
+ * Last model / permission chips from a Grok (or similar) TUI footer, e.g.
+ * `Grok 4.6 (medium) · always-approve`. Used by the composer, not the thread.
+ */
+export function extractComposerStatus(text: string): ComposerStatus {
+  if (!text) return {};
+  const clean = stripAnsi(text).replace(/\r/g, "");
+  const tail = clean.split("\n").slice(-48);
+  const found: ComposerStatus = {};
+  for (const raw of tail) {
+    const line = raw.replace(/[\u2500-\u257F\u2580-\u259F]+/g, " ").replace(/\s+/g, " ").trim();
+    const grok = line.match(
+      /\b(Grok\s+[\d.]+)\s*(?:\((low|medium|high|xhigh)\))?\s*[·•]\s*([A-Za-z][A-Za-z0-9 +_-]*)/i,
+    );
+    if (grok) {
+      found.model = grok[1].replace(/\s+/g, " ").trim();
+      if (grok[2]) found.effort = grok[2].toLowerCase();
+      found.mode = grok[3].trim();
+    } else {
+      const generic = line.match(
+        /\b((?:Claude|Opus|Sonnet|Haiku|GPT|o\d|Codex|Gemini)[^\n·•]{0,40}?)\s*[·•]\s*(always-approve|bypass permissions|accept edits|plan mode|default|ask|yolo)\b/i,
+      );
+      if (generic) {
+        found.model = generic[1].replace(/\s+/g, " ").trim();
+        found.mode = generic[2].trim();
+      }
+    }
+    const effortOnly = line.match(/\((low|medium|high|xhigh)\)/i);
+    if (effortOnly && !found.effort) found.effort = effortOnly[1].toLowerCase();
+    const ctxm = line.match(/\b([\d.]+)\s*([KMBkmb])\s*\/\s*([\d.]+)\s*([KMBkmb])\b/);
+    if (ctxm) {
+      const used = unitToNum(ctxm[1], ctxm[2]);
+      const total = unitToNum(ctxm[3], ctxm[4]);
+      if (total > 0) {
+        const pct = (used / total) * 100;
+        found.ctx = `${pct < 10 ? pct.toFixed(1) : pct.toFixed(0)}%`;
+      }
+    }
+    const ctxpct = line.match(/\bctx\s+(\d+%)/i);
+    if (ctxpct) found.ctx = ctxpct[1];
+  }
+  return found;
+}
+
+/** Hidden chain-of-thought leaked by the TUI — never assistant prose. */
+export function isInternalMonologue(line: string): boolean {
+  return (
+    /^The user (just )?(said|asked|wants|typed)\b/i.test(line) ||
+    /^I should respond\b/i.test(line) ||
+    /^No tools needed\b/i.test(line) ||
+    /simple greeting/i.test(line) ||
+    /^they(?:'re| are) communicating\b/i.test(line)
+  );
+}
+
+/**
+ * True when a pane transcript is a conversation, not a raw shell dump.
+ * Used by 分屏 to open the chat view on ZCODE/Claude panes that herdr has
+ * not (yet) classified as agents.
+ */
+export function looksLikeChat(text: string): boolean {
+  if (!text) return false;
+  const clean = stripAnsi(text);
+  if (/ZCODE\b/i.test(clean)) return true;
+  if (/\bGrok Build\b/i.test(clean) || /\bGrok\s+[\d.]+\s*\(/i.test(clean)) return true;
+  if (/ctrl\s*\+\s*o to expand/i.test(clean)) return true;
+  if (/^\[\s*[✓✔√]\s*[\d.]+\s*s\s*\]/m.test(clean)) return true;
+  if (/^[❯›▸]\s*\S/m.test(clean)) return true;
+  if (/^⏺\s+\S/m.test(clean)) return true;
+  for (const line of clean.split("\n")) {
+    const t = line.trim();
+    if (/^[>❯›▸]\s*\S/.test(t) && !/^[A-Za-z]:\\/.test(t) && !/\b\d{1,2}:\d{2}\b/.test(t)) return true;
+  }
+  return false;
+}
+
+/**
+ * Structural continuation of a user prompt (V7 F1). These lines are part of
+ * the typed prompt's markdown body in the TUI (wrapped lists / URL labels),
+ * not the assistant reply. Keep this tight: a prose sentence with no marker
+ * must fall through to the assistant stream.
+ */
+export function isUserContinuation(line: string): boolean {
+  return /^(?:[-*+] |\d+[.)] |#{1,6} |\s{2,}\S|URL\s*:|https?:\/\/)/i.test(line);
 }
 
 /**
@@ -199,14 +425,14 @@ function isFooterLine(line: string): boolean {
  * Deliberately excludes prose punctuation (em/en dash, `▸`, `✻`, `›`) so real
  * content is never eaten.
  */
-const TREE_PREFIX_RE = /^[└┌┐┘│┝┠┣├┤┬┴┼╭╮╯╰╔╗╚╝╠╣╦╩╬═║─┄┅┆┇┈┉┊⎾⎿⏋⏌\s]+/;
+const TREE_PREFIX_RE = /^[└┌┐┘│┃┝┠┣├┤┬┴┼╭╮╯╰╔╗╚╝╠╣╦╩╬═║─┄┅┆┇┈┉┊⎾⎿⏋⏌\s]+/;
 
 /**
  * A tool-call marker line (V6 F2): one of the `⏺ ● • ◆` glyphs followed by the
  * line's remaining text. The marker alone is not enough — see
  * {@link validToolCall}.
  */
-const TOOL_MARKER_RE = /^[⏺●•◆]\s?(.*)$/;
+const TOOL_MARKER_RE = /^[⏺●]\s?(.*)$/;
 
 /**
  * Sentence-starter words that can never begin a tool name (V6 F2): agent prose
@@ -241,6 +467,8 @@ const SENTENCE_STARTER_WORDS = new Set([
 function validToolCall(rest: string): string | null {
   const call = rest.match(/^([A-Za-z_][\w.+-]*)\s*\(/);
   if (call) return call[1];
+  // CJK prose after a bullet is never a tool (`● 你好！…`).
+  if (/^[\u4e00-\u9fff]/.test(rest)) return null;
   const words = rest.split(/\s+/).filter(Boolean);
   if (words.length === 0 || words.length > 3) return null;
   if (SENTENCE_STARTER_WORDS.has(words[0].toLowerCase())) return null;
@@ -315,6 +543,56 @@ export function extractImagePaths(text: string): { text: string; images: string[
  * first ASCII identifier in the body (e.g. "运行 npm test" → "npm"); otherwise
  * the first whitespace-delimited token.
  */
+function isNewBlockLine(line: string): boolean {
+  const t = line.trim();
+  if (!t) return true;
+  if (isSeparatorLine(t) || isChromeLine(t)) return true;
+  if (/^```/.test(t)) return true;
+  if (/^[❯›>⏺●◆❖]/.test(t)) return true;
+  if (/^(?:[-*+]|•)\s/.test(t) || /^\d+[.)]\s/.test(t)) return true;
+  if (thinkingOf(t) !== null || metaOf(t) !== null) return true;
+  if (extractUserInput(t) !== null) return true;
+  return false;
+}
+
+function joinSoftWrap(prev: string, next: string): string | null {
+  const p = prev.trimEnd();
+  const n = next.trim();
+  if (!p || !n || isNewBlockLine(n)) return null;
+  if (/^[❯›>]/.test(p.trim()) || extractUserInput(p.trim()) !== null) return null;
+  if (/[。！？.!?]$/.test(p)) return null;
+  if (/\.[A-Za-z0-9]{1,8}$/.test(p)) return null;
+  if (/[:：]$/.test(p) && /^(?:[-*+•]|\d+[.)])/.test(n)) return null;
+  if (/^[，。！？、；：,.!?]/.test(n)) {
+    return p.replace(/\s+$/, "") + n.replace(/^\s+/, "");
+  }
+  const lastTok = p.split(/\s+/).pop() ?? "";
+  if (/[A-Za-z0-9_]$/.test(p) && /^[a-z0-9_.]/.test(n)) {
+    if (lastTok.length <= 3) return p + " " + n;
+    return p + n;
+  }
+  if (/[A-Za-z0-9]$/.test(p) && /^[\u4e00-\u9fff]/.test(n)) return p + n;
+  if (/[\u4e00-\u9fff]$/.test(p) && /^[\u4e00-\u9fff]/.test(n)) return p + n;
+  return null;
+}
+
+/** Rejoin TUI hard-wraps (`batch_proc` + `ess_cameras.py`) before classifying. */
+export function unwrapSoftWraps(text: string): string {
+  const lines = text.replace(/\r/g, "").split("\n");
+  const out: string[] = [];
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+    if (out.length === 0) {
+      out.push(line);
+      continue;
+    }
+    const joined = joinSoftWrap(out[out.length - 1], line);
+    if (joined !== null) out[out.length - 1] = joined;
+    else out.push(line);
+  }
+  return out.join("\n");
+}
+
 export function toolNameOf(body: string): string {
   const call = body.match(/^([A-Za-z_][\w.-]*)\s*\(/);
   if (call) return call[1];
@@ -324,8 +602,16 @@ export function toolNameOf(body: string): string {
 }
 
 /** Parse a full transcript into ordered blocks. */
+/** Keep the tail of a huge TUI dump so parse/render stay cheap. */
+export function clipTranscript(text: string, maxChars = 24_000): string {
+  if (text.length <= maxChars) return text;
+  const slice = text.slice(-maxChars);
+  const cut = slice.search(/\n[❯›>]\s/);
+  return cut >= 0 ? slice.slice(cut + 1) : slice;
+}
+
 export function parseTranscript(text: string): Block[] {
-  const clean = stripAnsi(text).replace(/\r/g, "");
+  const clean = unwrapSoftWraps(stripAnsi(clipTranscript(text)).replace(/\r/g, ""));
   const lines = clean.split("\n");
 
   const blocks: Block[] = [];
@@ -333,10 +619,19 @@ export function parseTranscript(text: string): Block[] {
   let codeBuf: { lang: string; lines: string[] } | null = null;
   /** Tool block currently accepting file-listing lines (V4 F1), if any. */
   let fileCtx: Block | null = null;
+  /** User block currently accepting markdown continuation lines (V7 F1). */
+  let userCtx: Block | null = null;
+  /** Swallow TUI chain-of-thought between Kneading… and Frosting…(Ns). */
+  let thinkingCtx = false;
 
   const flushAssistant = () => {
     if (!assistantBuf.length) return;
-    const joined = assistantBuf.join("\n").trim();
+    const joined = assistantBuf
+      .join("\n")
+      .replace(/^[•●◦▪▫]\s+/gm, "- ")
+      .replace(/[█░▒▓]+$/gm, "")
+      .replace(/[ \t]+$/gm, "")
+      .trim();
     assistantBuf = [];
     if (!joined) return;
     const { text: md, images } = extractImagePaths(joined);
@@ -372,12 +667,48 @@ export function parseTranscript(text: string): Block[] {
     if (!trimmed) continue;
     // Drop rule/box decoration lines.
     if (isSeparatorLine(trimmed)) continue;
+    if (isChromeLine(trimmed) || isChromeLine(line.trim())) continue;
+    if (isInternalMonologue(trimmed)) continue;
+
+    const cook = cookingOf(trimmed);
+    if (cook) {
+      flushAssistant();
+      fileCtx = null;
+      userCtx = null;
+      const last = blocks[blocks.length - 1];
+      if (last?.type === "thinking") {
+        if (cook.duration) last.text = cook.duration;
+      } else {
+        blocks.push({ type: "thinking", text: cook.duration ?? "" });
+      }
+      thinkingCtx = !cook.done;
+      continue;
+    }
+    const thinkLine = thinkingOf(trimmed);
+    if (thinkLine !== null) {
+      flushAssistant();
+      fileCtx = null;
+      userCtx = null;
+      thinkingCtx = false;
+      const last = blocks[blocks.length - 1];
+      if (last?.type === "thinking") {
+        if (thinkLine) last.text = thinkLine;
+      } else {
+        blocks.push({ type: "thinking", text: thinkLine });
+      }
+      continue;
+    }
+    if (thinkingCtx) {
+      if (extractUserInput(trimmed) !== null) thinkingCtx = false;
+      else continue;
+    }
 
     // Fenced code opens (optionally with a language tag).
     const fence = trimmed.match(/^```\s*([\w+#.-]*)/);
     if (fence) {
       flushAssistant();
       fileCtx = null;
+      userCtx = null;
       codeBuf = { lang: (fence[1] ?? "").toLowerCase(), lines: [] };
       continue;
     }
@@ -394,20 +725,12 @@ export function parseTranscript(text: string): Block[] {
       fileCtx = null;
     }
 
-    // Thinking-collapse line → dedicated weak block, never assistant prose.
-    const thinking = thinkingOf(trimmed);
-    if (thinking !== null) {
-      flushAssistant();
-      fileCtx = null;
-      blocks.push({ type: "thinking", text: thinking });
-      continue;
-    }
-
     // Status line → weak meta separator (✻ Baked for 28s / Worked for 12s).
     const meta = metaOf(trimmed);
     if (meta !== null) {
       flushAssistant();
       fileCtx = null;
+      userCtx = null;
       blocks.push({ type: "meta", text: meta });
       continue;
     }
@@ -420,7 +743,13 @@ export function parseTranscript(text: string): Block[] {
     if (userRest !== null) {
       flushAssistant();
       fileCtx = null;
-      if (userRest) blocks.push({ type: "user", text: userRest });
+      if (userRest) {
+        const block: Block = { type: "user", text: userRest };
+        blocks.push(block);
+        userCtx = block;
+      } else {
+        userCtx = null;
+      }
       continue;
     }
 
@@ -428,6 +757,7 @@ export function parseTranscript(text: string): Block[] {
     // footer ("▸▸ bypass permissions on (shift+tab to cycle)") starts with
     // ▸▸, which no prompt rule matches, so it still lands here and is dropped.
     if (isFooterLine(trimmed) || /^[✻※]/.test(trimmed)) {
+      userCtx = null;
       continue;
     }
 
@@ -443,10 +773,12 @@ export function parseTranscript(text: string): Block[] {
       if (toolName === null) {
         // Prose next to a bullet glyph → assistant text, marker stripped.
         fileCtx = null;
+        userCtx = null;
         assistantBuf.push(body);
         continue;
       }
       flushAssistant();
+      userCtx = null;
       // V6 F2 / review m1: the ROW shows the call-form argument ("npm run
       // build"), the expanded detail shows the full `Name(args)` body —
       // never "Bash(Bash…)" twice. Non-call forms: both carry the body.
@@ -461,6 +793,15 @@ export function parseTranscript(text: string): Block[] {
       fileCtx = block; // a listing may follow the call line
       continue;
     }
+
+    if (userCtx && isUserContinuation(trimmed)) {
+      // Block-level markdown (lists, URL labels, headings, bare URLs) needs a
+      // blank line so marked doesn't glue them onto the title paragraph.
+      const block = /^(?:[-*+] |\d+[.)] |#{1,6} |URL\s*:|https?:\/\/)/i.test(trimmed);
+      userCtx.text += (block ? "\n\n" : "\n") + trimmed;
+      continue;
+    }
+    userCtx = null;
 
     assistantBuf.push(trimmed);
   }
@@ -502,7 +843,21 @@ export function groupTurns(blocks: Block[]): Turn[] {
     }
   }
   if (cur.users.length || cur.body.length) turns.push(cur);
-  return turns;
+  return dedupeTurns(turns);
+}
+
+/** TUI redraws the same turn many times into scrollback — keep one. */
+export function dedupeTurns(turns: Turn[]): Turn[] {
+  const out: Turn[] = [];
+  let last = "";
+  for (const t of turns) {
+    const firstA = t.body.find((b) => b.type === "assistant")?.text.trim().slice(0, 80) ?? "";
+    const key = JSON.stringify({ u: t.users.map((b) => b.text.trim()), a: firstA });
+    if (key === last) continue;
+    last = key;
+    out.push(t);
+  }
+  return out;
 }
 
 /**
@@ -518,6 +873,14 @@ export interface TurnStats {
   duration: string | null;
 }
 
+/** `12` → `12s`; `97` → `1m 37s` (V7 F2, reference pill `14:34:12 · 1m 37s`). */
+export function formatDurationSeconds(sec: number, raw: string = String(sec)): string {
+  if (!Number.isFinite(sec) || sec < 60) return `${raw}s`;
+  const minutes = Math.floor(sec / 60);
+  const rest = Math.round(sec % 60);
+  return `${minutes}m ${rest}s`;
+}
+
 export function turnStats(turn: Turn): TurnStats {
   const files: string[] = [];
   let steps = 0;
@@ -528,7 +891,7 @@ export function turnStats(turn: Turn): TurnStats {
       for (const f of b.files ?? []) if (!files.includes(f)) files.push(f);
     } else if (b.type === "meta" && duration === null) {
       const m = b.text.match(/([\d.]+)\s*s\b/i);
-      if (m) duration = `${m[1]}s`;
+      if (m) duration = formatDurationSeconds(Number(m[1]), m[1]);
     }
   }
   return { steps, files, duration };

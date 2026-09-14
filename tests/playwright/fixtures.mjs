@@ -61,7 +61,11 @@ export async function launchStudio({ build } = {}) {
   const app = await _electron.launch({
     args: [PROJECT, `--remote-debugging-port=${cdpPort}`],
     executablePath: electronBin,
-    env: { ...process.env, HERDR_STUDIO_SOCKET: sock },
+    env: {
+      ...process.env,
+      HERDR_STUDIO_SOCKET: sock,
+      ELECTRON_RENDERER_URL: "http://127.0.0.1:5173",
+    },
     timeout: 30000,
   });
   const page = await app.firstWindow();

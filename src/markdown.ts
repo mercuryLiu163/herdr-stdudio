@@ -100,7 +100,44 @@ function postProcess(html: string, opts: RenderMarkdownOptions): string {
     code.innerHTML = highlightCode(code.textContent ?? "", m?.[1]);
     code.classList.add("hljs");
   });
+  autolinkUrls(tpl.content);
   return tpl.innerHTML;
+}
+
+const BARE_URL_RE = /https?:\/\/[^\s<>)"'`]+/gi;
+
+/** Turn bare http(s) URLs in text nodes into guarded <a> chips (V7 F3). */
+function autolinkUrls(root: ParentNode) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const nodes: Text[] = [];
+  while (walker.nextNode()) {
+    const n = walker.currentNode as Text;
+    if (!n.data || !/https?:\/\//i.test(n.data)) continue;
+    if (n.parentElement?.closest("a, code, pre")) continue;
+    nodes.push(n);
+  }
+  for (const n of nodes) {
+    const frag = document.createDocumentFragment();
+    const s = n.data;
+    let last = 0;
+    BARE_URL_RE.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = BARE_URL_RE.exec(s))) {
+      if (m.index > last) frag.append(s.slice(last, m.index));
+      const href = m[0].replace(/[.,;:!?)]+$/, "");
+      const a = document.createElement("a");
+      a.setAttribute("href", href);
+      a.setAttribute("target", "_blank");
+      a.setAttribute("rel", "noopener noreferrer");
+      a.textContent = href;
+      frag.append(a);
+      if (href.length < m[0].length) frag.append(m[0].slice(href.length));
+      last = m.index + m[0].length;
+    }
+    if (last === 0) continue;
+    if (last < s.length) frag.append(s.slice(last));
+    n.replaceWith(frag);
+  }
 }
 
 /** Markdown → sanitised HTML string (escaped source, guarded links, hljs code). */

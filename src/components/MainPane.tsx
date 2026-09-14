@@ -2,13 +2,13 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, MouseEvent as ReactMouseEvent } from "react";
 import { useStore, agentForPane, agentDisplayName } from "../store";
 import { AnsiView } from "../ansi";
-import { parseTranscript, groupTurns, turnStats } from "../chat-parser";
+import { parseTranscript, groupTurns, turnStats, looksLikeChat, extractComposerStatus, IMAGE_EXT_RE } from "../chat-parser";
 import type { Block, Turn } from "../chat-parser";
 import { renderMarkdown, highlightCode } from "../markdown";
 import type { PaneLayout, PaneLayoutEntry, PaneRect } from "../types";
-import { paneLayout, paneResize, agentPrompt, paneSendText, paneSendKeys, agentSendKeys } from "../api";
+import { paneLayout, paneResize, agentPrompt, paneSendText, paneSendKeys, agentSendKeys, paneType } from "../api";
 import { slashCommandsFor, filterSlashCommands } from "../slash-commands";
-import { IconBook, IconClock, IconFile, IconSend, IconTerminal } from "./icons";
+import { IconBook, IconClock, IconFile, IconPlay, IconPlus, IconStop, IconTerminal, IconUserMsg } from "./icons";
 import { IconChevron, IconColumns, IconMosaic } from "./icons";
 
 const statusLabel: Record<string, string> = {
@@ -36,6 +36,23 @@ function relativeTime(ts: number): string {
 
 type ViewMode = "chat" | "raw";
 
+/** Isolated so MainPane's header does not re-render on every output tick. */
+function AutoChatView({
+  paneId,
+  isAgent,
+  onAuto,
+}: {
+  paneId: string | null;
+  isAgent: boolean;
+  onAuto: (view: ViewMode) => void;
+}) {
+  const text = useStore((s) => (paneId ? s.outputs[paneId]?.text : undefined));
+  useEffect(() => {
+    onAuto(isAgent || looksLikeChat(text ?? "") ? "chat" : "raw");
+  }, [paneId, isAgent, text, onAuto]);
+  return null;
+}
+
 export function MainPane() {
   const activeTabId = useStore((s) => s.activeTabId);
   const activePaneId = useStore((s) => s.activePaneId);
@@ -52,14 +69,25 @@ export function MainPane() {
   const status = useStore((s) => s.status);
   const layoutMode = useStore((s) => s.layoutMode);
   const setLayoutMode = useStore((s) => s.setLayoutMode);
-  const [view, setView] = useState<ViewMode>("raw");
+  const [view, setView] = useState<ViewMode>("chat");
+  const viewPicked = useRef<ViewMode | null>(null);
 
-  // F4: agent panes default to the chat view, shell panes to raw output.
-  // Re-apply when the pane changes or when an agent appears/disappears on it.
+  // Agent panes, and shells whose transcript is actually a conversation
+  // (ZCODE etc. — herdr may not have classified them as agents), open in
+  // the chat view. The user can still flip to 原始输出; a pane change
+  // clears that override.
   const isAgent = !!agent;
   useEffect(() => {
-    setView(isAgent ? "chat" : "raw");
-  }, [activePaneId, isAgent]);
+    viewPicked.current = null;
+  }, [activePaneId]);
+  const applyAutoView = useCallback((next: ViewMode) => {
+    if (viewPicked.current) return;
+    setView(next);
+  }, []);
+  const pickView = (next: ViewMode) => {
+    viewPicked.current = next;
+    setView(next);
+  };
 
   if (!tab) {
     return (
@@ -79,6 +107,7 @@ export function MainPane() {
 
   return (
     <div className="main">
+      <AutoChatView paneId={activePaneId} isAgent={isAgent} onAuto={applyAutoView} />
       <div className="main-header">
         <div style={{ display: "flex", alignItems: "flex-start", gap: 16 }}>
           <div style={{ flex: 1, minWidth: 0 }}>
@@ -136,7 +165,7 @@ export function MainPane() {
                   data-testid="view-chat"
                   aria-pressed={view === "chat"}
                   className={view === "chat" ? "on" : ""}
-                  onClick={() => setView("chat")}
+                  onClick={() => pickView("chat")}
                 >
                   对话
                 </button>
@@ -144,7 +173,7 @@ export function MainPane() {
                   data-testid="view-raw"
                   aria-pressed={view === "raw"}
                   className={view === "raw" ? "on" : ""}
-                  onClick={() => setView("raw")}
+                  onClick={() => pickView("raw")}
                 >
                   原始输出
                 </button>
@@ -188,16 +217,17 @@ export function MainPane() {
       ) : view === "chat" ? (
         <ChatView />
       ) : (
-        <OutputReader />
+        <OutputReader onSwitchToChat={() => pickView("chat")} />
       )}
       <Composer />
     </div>
   );
 }
 
-function OutputReader() {
+function OutputReader({ onSwitchToChat }: { onSwitchToChat?: () => void }) {
   const paneId = useStore((s) => s.activePaneId);
   const output = useStore((s) => (s.activePaneId ? s.outputs[s.activePaneId] : undefined));
+  const asChat = looksLikeChat(output?.text ?? "");
   const agents = useStore((s) => s.agents);
   const refresh = useStore((s) => s.refreshPaneOutput);
   const status = useStore((s) => s.status);
@@ -243,6 +273,16 @@ function OutputReader() {
       }}
     >
       <div className="reader-card" data-testid="reader-card">
+        {asChat && onSwitchToChat && (
+          <button
+            type="button"
+            className="switch-to-chat"
+            data-testid="switch-to-chat"
+            onClick={onSwitchToChat}
+          >
+            这段是对话转写，点此切换到「对话」视图重排
+          </button>
+        )}
         <ReaderMeta agent={agent} output={output} paneId={paneId} refresh={refresh} />
         {output?.failed ? (
           <div style={{ color: "var(--text-faint)", padding: "8px 0" }}>
@@ -502,51 +542,58 @@ function ChatTurn({
   const kind = agent?.agent || "agent";
   const name = agent ? agentDisplayName(agent) || kind : "agent";
   const initial = (kind[0] ?? "A").toUpperCase();
+  const hasBody = turn.body.length > 0 || stats.files.length > 0;
   return (
     <section className="chat-turn" data-testid="chat-turn">
       {turn.users.map((b, i) => (
         <ChatBlock key={`u${i}`} block={b} cwd={cwd} cwds={cwds} />
       ))}
+      {hasBody && (
       <div className="turn-header" data-testid="turn-header">
-        {/* ModelAvatar-style monogram: agent-kind initial + hash hue */}
-        <span className="turn-avatar" style={{ background: `hsl(${hashHue(kind)} 58% 46%)` }} aria-hidden>
-          {initial}
-        </span>
-        <span className="turn-agent">{name}</span>
-        {/* Pane-level last-activity clock (outputs.updatedAt), NOT a
-            per-turn timestamp — labelled so it never reads as "when this
-            turn happened". */}
-        {clock && (
-          <span className="turn-time" title="最后活动：本窗格输出流的最新更新时间">
-            最后活动 {clock}
+        <span className="turn-rule" aria-hidden />
+        <div className="turn-pill" data-testid="turn-pill">
+          <button
+            className={`turn-collapse ${collapsed ? "" : "open"}`}
+            data-testid="turn-collapse"
+            aria-expanded={!collapsed}
+            aria-label={collapsed ? "展开本轮" : "折叠本轮"}
+            title={collapsed ? "展开本轮" : "折叠本轮"}
+            onClick={onToggle}
+          >
+            <IconChevron size={11} />
+          </button>
+          <span className="turn-avatar" style={{ background: `hsl(${hashHue(kind)} 58% 46%)` }} aria-hidden>
+            {initial}
           </span>
-        )}
-        {stats.steps > 0 && (
-          <span className="turn-chip" title="本轮工具调用步数">
-            {stats.steps} 步
-          </span>
-        )}
-        {stats.files.length > 0 && (
-          <span className="turn-chip" title="本轮涉及的文件数">
-            {stats.files.length} 文件
-          </span>
-        )}
-        {stats.duration && (
-          <span className="turn-chip" title="本轮耗时">
-            <IconClock size={10} /> {stats.duration}
-          </span>
-        )}
-        <button
-          className={`turn-collapse ${collapsed ? "" : "open"}`}
-          data-testid="turn-collapse"
-          aria-expanded={!collapsed}
-          aria-label={collapsed ? "展开本轮" : "折叠本轮"}
-          title={collapsed ? "展开本轮" : "折叠本轮"}
-          onClick={onToggle}
-        >
-          <IconChevron size={12} />
-        </button>
+          <span className="turn-agent">{name}</span>
+          {clock && (
+            <span className="turn-time" title="最后活动：本窗格输出流的最新更新时间">
+              {clock}
+            </span>
+          )}
+          {stats.duration && (
+            <>
+              <span className="turn-dot" aria-hidden>
+                ·
+              </span>
+              <span className="turn-chip" title="本轮耗时">
+                {stats.duration}
+              </span>
+            </>
+          )}
+          {stats.steps > 0 && (
+            <span className="turn-chip" title="本轮工具调用步数">
+              {stats.steps} 步
+            </span>
+          )}
+          {stats.files.length > 0 && (
+            <span className="turn-chip" title="本轮涉及的文件数">
+              {stats.files.length} 文件
+            </span>
+          )}
+        </div>
       </div>
+      )}
       {!collapsed &&
         turn.body.map((b, bi) => <ChatBlock key={`b${bi}`} block={b} cwd={cwd} cwds={cwds} />)}
       {!collapsed && stats.files.length > 0 && <TurnFilesCard files={stats.files} />}
@@ -601,11 +648,7 @@ const ChatBlock = memo(
   function ChatBlock({ block, cwd, cwds }: { block: Block; cwd: string | null; cwds: string[] }) {
     switch (block.type) {
       case "user":
-        return (
-          <div className="chat-msg user" data-testid="msg-user">
-            <div className="chat-bubble">{block.text}</div>
-          </div>
-        );
+        return <UserCard text={block.text} />;
       case "assistant":
         return (
           <div className="chat-msg assistant" data-testid="msg-assistant">
@@ -683,6 +726,50 @@ const ChatBlock = memo(
   },
   (a, b) => a.cwd === b.cwd && a.cwds === b.cwds && sameBlock(a.block, b.block),
 );
+
+/**
+ * V7 F1: user prompt re-laid out as a right-aligned card. A single short
+ * line stays a quiet bubble; a multiline / markdown prompt becomes a
+ * collapsible title + markdown body (mcode ChatPane user card).
+ */
+function UserCard({ text }: { text: string }) {
+  const lines = text.replace(/\s+$/, "").split("\n");
+  const title = (lines[0] ?? "").trim();
+  const rich = lines.length > 1;
+  const [open, setOpen] = useState(true);
+  return (
+    <div className="chat-msg user" data-testid="msg-user">
+      <div className={`chat-bubble${rich ? " user-card" : ""}`}>
+        {rich ? (
+          <>
+            <button
+              type="button"
+              className={`user-card-head${open ? " open" : ""}`}
+              data-testid="user-card-toggle"
+              aria-expanded={open}
+              onClick={() => setOpen((v) => !v)}
+            >
+              <span className="user-card-icon" aria-hidden>
+                <IconUserMsg size={12} />
+              </span>
+              <span className="user-card-title">{title}</span>
+              <span className="user-card-chevron" aria-hidden>
+                <IconChevron size={11} />
+              </span>
+            </button>
+            {open && (
+              <div className="user-card-body">
+                <MarkdownBody text={text} />
+              </div>
+            )}
+          </>
+        ) : (
+          text
+        )}
+      </div>
+    </div>
+  );
+}
 
 /** Markdown → sanitised HTML (escaped source, guarded links, hljs code). */
 function MarkdownBody({ text }: { text: string }) {
@@ -1139,6 +1226,74 @@ const MosaicCell = memo(function MosaicCell({
   );
 });
 
+type Attachment = { id: string; path: string; name: string; preview: string };
+
+function atRef(p: string): string {
+  return /\s/.test(p) ? `@"${p}"` : `@${p}`;
+}
+
+const EFFORT_OPTIONS = [
+  { id: "low", label: "Low", cmd: "/effort low" },
+  { id: "medium", label: "Medium", cmd: "/effort medium" },
+  { id: "high", label: "High", cmd: "/effort high" },
+  { id: "xhigh", label: "xHigh", cmd: "/effort xhigh" },
+] as const;
+
+type ModeId = "ask" | "auto" | "plan" | "bypass";
+
+const MODE_OPTIONS: Array<{ id: ModeId; label: string; cmd: string; hint: string; tone: string }> = [
+  { id: "ask", label: "Ask", cmd: "", hint: "每次询问权限", tone: "dim" },
+  { id: "auto", label: "Auto", cmd: "/auto", hint: "安全操作自动批准", tone: "ok" },
+  { id: "plan", label: "Plan", cmd: "/plan", hint: "计划模式", tone: "info" },
+  { id: "bypass", label: "Bypass", cmd: "/always-approve", hint: "/always-approve", tone: "danger" },
+];
+
+function effortLabel(effort?: string): string {
+  if (!effort) return "";
+  const hit = EFFORT_OPTIONS.find((e) => e.id === effort.toLowerCase());
+  return hit?.label ?? effort;
+}
+
+function modeIdOf(mode?: string): ModeId {
+  const m = (mode ?? "").toLowerCase();
+  if (/always-approve|yolo|bypass/.test(m)) return "bypass";
+  if (/plan/.test(m)) return "plan";
+  if (/^auto$|auto-edit/.test(m)) return "auto";
+  return "ask";
+}
+
+function isSlashCommand(text: string): boolean {
+  const t = text.trim();
+  return /^\/[a-z][\w-]*(?:\s+\S+)*$/i.test(t) && !t.includes("\n");
+}
+
+async function sendTuiSlash(paneId: string, cmd: string): Promise<void> {
+  const raw = cmd.trim();
+  const m = raw.match(/^\/([A-Za-z][\w-]*)([\s\S]*)$/);
+  if (!m) {
+    await paneType(paneId, raw, ["enter"]);
+    return;
+  }
+  // Type `/` first so Grok/Claude open the slash palette, then the rest + Enter
+  // to run it as a TUI command — never as an agent user-turn.
+  await paneType(paneId, "/");
+  await new Promise((r) => setTimeout(r, 50));
+  await paneType(paneId, `${m[1]}${m[2]}`, ["enter"]);
+}
+
+function isImageFile(file: File): boolean {
+  return file.type.startsWith("image/") || IMAGE_EXT_RE.test(file.name);
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("read failed"));
+    reader.onload = () => resolve(String(reader.result ?? ""));
+    reader.readAsDataURL(file);
+  });
+}
+
 function Composer() {
   const layoutMode = useStore((s) => s.layoutMode);
   const paneId = useStore((s) => s.activePaneId);
@@ -1148,18 +1303,27 @@ function Composer() {
   const selectPane = useStore((s) => s.selectPane);
   const pane = useStore((s) => s.panes.find((p) => p.pane_id === s.activePaneId) ?? null);
   const agent = useStore((s) => agentForPane(s.agents, s.activePaneId));
+  const outputText = useStore((s) => (s.activePaneId ? s.outputs[s.activePaneId]?.text : undefined));
   const status = useStore((s) => s.status);
   const pushToast = useStore((s) => s.pushToast);
   const refreshPane = useStore((s) => s.refreshPaneOutput);
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [atts, setAtts] = useState<Attachment[]>([]);
+  const [dragOver, setDragOver] = useState(false);
   const taRef = useRef<HTMLTextAreaElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const sessionBar = useMemo(() => extractComposerStatus(outputText ?? ""), [outputText]);
   // V4 F2 slash palette: open only while typing a single-line "/query" on an
   // agent pane; explicit state (not derived) so selecting a command and
   // keeping the text in the input does not re-open the palette.
   const [slashOpen, setSlashOpen] = useState(false);
   const [slashIdx, setSlashIdx] = useState(0);
+  const [openMenu, setOpenMenu] = useState<null | "mode" | "effort">(null);
+  const [modeOver, setModeOver] = useState<ModeId | null>(null);
+  const [effortOver, setEffortOver] = useState<string | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
 
   const slashItems = useMemo(() => {
     if (!agent || !slashOpen) return [];
@@ -1190,33 +1354,63 @@ function Composer() {
       });
   }, [layoutMode, panes, agents, activeTabId]);
 
-  const canSend = paneId !== null && text.trim().length > 0 && !sending && status !== "no-server";
+  const canSend =
+    paneId !== null && (text.trim().length > 0 || atts.length > 0) && !sending && status !== "no-server";
+
+  const addFiles = async (files: FileList | File[]) => {
+    const list = Array.from(files);
+    for (const file of list) {
+      if (!isImageFile(file)) {
+        pushToast("error", `不支持的文件类型：${file.name}`);
+        continue;
+      }
+      try {
+        let filePath = "";
+        try {
+          filePath = window.herdr.pathForFile(file) || "";
+        } catch {
+          filePath = "";
+        }
+        if (!filePath) {
+          const data = await readFileAsDataUrl(file);
+          filePath = await window.herdr.fsSaveTemp({ data, name: file.name });
+        }
+        const preview = URL.createObjectURL(file);
+        setAtts((prev) => {
+          if (prev.some((a) => a.path === filePath)) {
+            URL.revokeObjectURL(preview);
+            return prev;
+          }
+          return [...prev, { id: `${filePath}-${Date.now()}`, path: filePath, name: file.name, preview }];
+        });
+      } catch (err: any) {
+        pushToast("error", `无法添加图片：${err?.message ?? file.name}`);
+      }
+    }
+  };
+
+  const removeAtt = (id: string) => {
+    setAtts((prev) => {
+      const hit = prev.find((a) => a.id === id);
+      if (hit) URL.revokeObjectURL(hit.preview);
+      return prev.filter((a) => a.id !== id);
+    });
+  };
 
   const send = async () => {
     if (!canSend || !paneId) return;
+    const refs = atts.map((a) => atRef(a.path)).join(" ");
+    const body = [refs, text.trim()].filter(Boolean).join("\n");
+    if (!body) return;
     setSending(true);
     setError(null);
     try {
-      if (agent) {
-        // agent.* accepts the hosting pane id as target; more reliable than the
-        // display name, which detected agents often don't have.
-        try {
-          await agentPrompt(agent.pane_id, text.trim());
-        } catch (err: any) {
-          // herdr only rejects agent.prompt with this exact condition for
-          // detected/reported agents that are not active NAMED agents; only
-          // that case falls back to typing into the pane. Timeouts and other
-          // errors must surface (rethrow) — a blind fallback could re-deliver
-          // the prompt after a slow-but-successful attempt and mask failures.
-          if (!/not an active named agent/i.test(String(err?.message ?? err))) throw err;
-          // Fall back to the plain-text TUI channel every agent accepts
-          // (V4 F2 slash commands rely on it).
-          await paneSendText(paneId, text.trim());
-        }
-      } else {
-        await paneSendText(paneId, text);
-      }
+      await deliver(body);
       setText("");
+      setAtts((prev) => {
+        for (const a of prev) URL.revokeObjectURL(a.preview);
+        return [];
+      });
       setTimeout(() => void refreshPane(paneId), 300);
     } catch (err: any) {
       setError(err?.message ?? "发送失败");
@@ -1226,22 +1420,117 @@ function Composer() {
     }
   };
 
+  const deliver = async (payload: string) => {
+    if (!paneId) return;
+    if (isSlashCommand(payload)) {
+      await sendTuiSlash(paneId, payload);
+      return;
+    }
+    if (agent) {
+      try {
+        await agentPrompt(agent.pane_id, payload);
+      } catch (err: any) {
+        if (!/not an active named agent/i.test(String(err?.message ?? err))) throw err;
+        await paneSendText(paneId, payload);
+      }
+    } else {
+      await paneSendText(paneId, payload);
+    }
+  };
+
   const interrupt = async (keys: string[]) => {
     if (!paneId) return;
     try {
       if (agent) await agentSendKeys(agent.pane_id, keys);
       else await paneSendKeys(paneId, keys);
-      pushToast("info", `已发送 ${keys.join(" ")}`);
       setTimeout(() => void refreshPane(paneId), 300);
     } catch (err: any) {
       pushToast("error", `发送按键失败：${err?.message ?? ""}`);
     }
   };
 
+  const sendSlash = async (cmd: string) => {
+    if (!paneId || status === "no-server") return;
+    try {
+      await sendTuiSlash(paneId, cmd);
+      setTimeout(() => void refreshPane(paneId), 500);
+    } catch (err: any) {
+      pushToast("error", err?.message ?? "发送失败");
+    }
+  };
+
+  useEffect(() => {
+    setModeOver(null);
+    setEffortOver(null);
+    setOpenMenu(null);
+  }, [paneId]);
+
+  useEffect(() => {
+    if (modeOver && modeIdOf(sessionBar.mode) === modeOver) setModeOver(null);
+    if (effortOver && (sessionBar.effort ?? "").toLowerCase() === effortOver) setEffortOver(null);
+  }, [sessionBar.mode, sessionBar.effort, modeOver, effortOver]);
+
+  useEffect(() => {
+    if (!openMenu) return;
+    const onDown = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setOpenMenu(null);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [openMenu]);
+
+  const grokLike = !!agent && /grok/i.test(agent.agent);
+  const modelText = sessionBar.model || (agent ? agent.agent : "");
+  const effortId = effortOver ?? sessionBar.effort ?? (grokLike ? "medium" : undefined);
+  const effortText = effortLabel(effortId);
+  const modeId = modeOver ?? (agent ? modeIdOf(sessionBar.mode) : undefined);
+  const modeOpt = MODE_OPTIONS.find((m) => m.id === modeId);
+  const working = agent?.agent_status === "working" || agent?.agent_status === "blocked";
+
+  const pickEffort = (id: string, cmd: string) => {
+    setEffortOver(id);
+    setOpenMenu(null);
+    void sendSlash(cmd);
+  };
+
+  const pickMode = (id: ModeId, cmd: string) => {
+    setOpenMenu(null);
+    if (id === modeId) return;
+    // Ask has no dedicated on-command: toggle off the active mode.
+    let toSend = cmd;
+    if (id === "ask") {
+      if (modeId === "bypass") toSend = "/always-approve";
+      else if (modeId === "auto") toSend = "/auto";
+      else if (modeId === "plan") toSend = "/plan";
+      else return;
+    }
+    if (!toSend) return;
+    setModeOver(id);
+    void sendSlash(toSend);
+  };
+
   return (
     <div className="composer-wrap">
       {error && <div className="inline-error">{error}</div>}
-      <div className="composer">
+      <div
+        className={`composer${dragOver ? " drag-over" : ""}`}
+        onDragEnter={(e) => {
+          e.preventDefault();
+          setDragOver(true);
+        }}
+        onDragOver={(e) => {
+          e.preventDefault();
+          setDragOver(true);
+        }}
+        onDragLeave={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragOver(false);
+        }}
+        onDrop={(e) => {
+          e.preventDefault();
+          setDragOver(false);
+          if (e.dataTransfer.files?.length) void addFiles(e.dataTransfer.files);
+        }}
+      >
         {paletteOpen && (
           <div className="slash-palette" data-testid="slash-palette">
             {slashItems.map((c, i) => (
@@ -1261,17 +1550,49 @@ function Composer() {
             ))}
           </div>
         )}
+        {atts.length > 0 && (
+          <div className="composer-atts" data-testid="composer-atts">
+            {atts.map((a) => (
+              <div className="composer-att" data-testid="composer-att" key={a.id} title={a.path}>
+                <img src={a.preview} alt={a.name} />
+                <button
+                  type="button"
+                  className="composer-att-x"
+                  aria-label={`移除 ${a.name}`}
+                  onClick={() => removeAtt(a.id)}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
         <textarea
           ref={taRef}
           value={text}
           placeholder={
             agent
-              ? `向 ${agentDisplayName(agent)} 发送任务…（Enter 发送，Shift+Enter 换行）`
+              ? "发送消息... (@ 引用文件 · / 命令 · 粘贴图片)"
               : pane
                 ? "输入 shell 命令…（Enter 执行）"
                 : "先选择一个窗格"
           }
           disabled={!paneId || status === "no-server"}
+          onPaste={(e) => {
+            const items = e.clipboardData?.items;
+            if (!items) return;
+            const images: File[] = [];
+            for (const item of Array.from(items)) {
+              if (item.kind === "file" && item.type.startsWith("image/")) {
+                const f = item.getAsFile();
+                if (f) images.push(f);
+              }
+            }
+            if (images.length) {
+              e.preventDefault();
+              void addFiles(images);
+            }
+          }}
           onChange={(e) => {
             const v = e.target.value;
             setText(v);
@@ -1313,6 +1634,28 @@ function Composer() {
           rows={2}
         />
         <div className="composer-row">
+          <input
+            ref={fileRef}
+            type="file"
+            accept="image/png,image/jpeg,image/gif,image/webp,image/bmp,image/svg+xml"
+            multiple
+            hidden
+            data-testid="composer-file-input"
+            onChange={(e) => {
+              if (e.target.files?.length) void addFiles(e.target.files);
+              e.target.value = "";
+            }}
+          />
+          <button
+            type="button"
+            className="composer-plus"
+            data-testid="composer-attach"
+            disabled={!paneId || status === "no-server"}
+            title="上传图片（也可拖放或粘贴）"
+            onClick={() => fileRef.current?.click()}
+          >
+            <IconPlus size={14} />
+          </button>
           {layoutMode === "unified" && targetOptions.length > 0 && (
             <select
               className="composer-target"
@@ -1329,16 +1672,125 @@ function Composer() {
               ))}
             </select>
           )}
-          <button className="hint-key" onClick={() => void interrupt(["esc"])} disabled={!paneId}>
-            Esc 中断
-          </button>
-          <button className="hint-key" onClick={() => void interrupt(["ctrl+c"])} disabled={!paneId}>
-            Ctrl+C
-          </button>
-          <button className="send-btn" onClick={() => void send()} disabled={!canSend}>
-            <IconSend />
-            {agent ? "发送 prompt" : "执行"}
-          </button>
+          <div className="composer-status" data-testid="composer-status" ref={menuRef}>
+            {modelText && (
+              <button
+                type="button"
+                className="composer-chip"
+                data-testid="composer-model"
+                disabled={!agent}
+                title="切换模型"
+                onClick={() => {
+                  setOpenMenu(null);
+                  void sendSlash("/model");
+                }}
+              >
+                {modelText}
+                <IconChevron size={10} />
+              </button>
+            )}
+            {effortText && (
+              <div className="composer-menu">
+                <button
+                  type="button"
+                  className={`composer-chip tone-${effortId === "high" || effortId === "xhigh" ? "warn" : effortId === "low" ? "dim" : "ok"}`}
+                  data-testid="composer-effort"
+                  title="推理力度"
+                  onClick={() => setOpenMenu(openMenu === "effort" ? null : "effort")}
+                >
+                  <span className="composer-dot" aria-hidden />
+                  {effortText}
+                  <IconChevron size={10} />
+                </button>
+                {openMenu === "effort" && (
+                  <div className="composer-menu-pop" data-testid="composer-effort-menu" role="menu">
+                    {EFFORT_OPTIONS.map((opt) => (
+                      <button
+                        type="button"
+                        key={opt.id}
+                        role="menuitem"
+                        className={`composer-menu-item${opt.id === effortId ? " active" : ""}`}
+                        onClick={() => pickEffort(opt.id, opt.cmd)}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+            {modeOpt && (
+              <div className="composer-menu">
+                <button
+                  type="button"
+                  className={`composer-chip tone-${modeOpt.tone}`}
+                  data-testid="composer-mode"
+                  title="/always-approve"
+                  onClick={() => setOpenMenu(openMenu === "mode" ? null : "mode")}
+                >
+                  <span className="composer-dot" aria-hidden />
+                  {modeOpt.label}
+                  <IconChevron size={10} />
+                </button>
+                {openMenu === "mode" && (
+                  <div className="composer-menu-pop" data-testid="composer-mode-menu" role="menu">
+                    {MODE_OPTIONS.map((opt) => (
+                      <button
+                        type="button"
+                        key={opt.id}
+                        role="menuitem"
+                        className={`composer-menu-item tone-${opt.tone}${opt.id === modeId ? " active" : ""}`}
+                        onClick={() => pickMode(opt.id, opt.cmd)}
+                      >
+                        <span>
+                          <span className="composer-dot" aria-hidden />
+                          {opt.label}
+                        </span>
+                        <span className="hint">{opt.hint}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+            {sessionBar.ctx && (
+              <span className="composer-ctx" data-testid="composer-ctx" title="上下文用量">
+                <span className="composer-ctx-bar" aria-hidden>
+                  <i style={{ width: sessionBar.ctx }} />
+                </span>
+                {sessionBar.ctx}
+              </span>
+            )}
+          </div>
+          <span className="composer-spacer" />
+          {agent && (
+            <span className="composer-brand" data-testid="composer-brand">
+              {agent.agent}
+            </span>
+          )}
+          {working ? (
+            <button
+              type="button"
+              className="composer-send stop"
+              data-testid="composer-send"
+              title="中断（Ctrl+C）"
+              disabled={!paneId}
+              onClick={() => void interrupt(["ctrl+c"])}
+            >
+              <IconStop />
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="composer-send"
+              data-testid="composer-send"
+              title={agent ? "发送" : "执行"}
+              onClick={() => void send()}
+              disabled={!canSend}
+            >
+              <IconPlay />
+            </button>
+          )}
         </div>
       </div>
     </div>

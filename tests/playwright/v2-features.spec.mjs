@@ -166,7 +166,7 @@ test.describe("F4 chat view", () => {
     await api.paneSendInput(
       sock,
       pane2.pane_id,
-      'echo "\u276f 帮我检查测试"; echo "\u23fa 运行 npm test"; echo "这是回复正文。"; echo "─────"',
+      'echo "\u276f 帮我检查测试"; echo "\u23fa Bash(npm test)"; echo "\u8fd0\u884c npm test"; echo "这是回复正文。"; echo "─────"',
     );
     await api.paneReportAgent(sock, pane2.pane_id, "e2e-fake", "working");
     await page.waitForFunction(
@@ -178,15 +178,16 @@ test.describe("F4 chat view", () => {
     const thread = page.getByTestId("chat-thread");
     await expect(thread).toBeVisible();
     await expect(thread.getByTestId("msg-user").first()).toContainText("帮我检查测试");
-    await expect(thread.getByTestId("msg-tool").first()).toContainText("运行 npm test");
+    await expect(thread.getByTestId("msg-tool").first()).toContainText("npm test");
     await expect(thread.getByTestId("msg-assistant").first()).toContainText("这是回复正文");
     // separator-only lines must not be rendered as message content
     const decorative = thread.locator("[data-testid^='msg-']").filter({ hasText: /^\s*─{3,}\s*$/ });
     await expect(decorative).toHaveCount(0);
   });
 
-  test("shell pane 默认原始输出视图", async () => {
+  test("空 shell 可切到原始输出视图", async () => {
     const { page } = ctx;
+    await page.getByTestId("view-raw").click();
     await expect(page.getByTestId("chat-thread")).toHaveCount(0);
     await expect(page.locator(".reader-card")).toBeVisible();
   });

@@ -7,6 +7,30 @@ export function IconTerminal({ size = 16 }: { size?: number }) {
   );
 }
 
+export function IconPlus({ size = 14 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
+      <path d="M8 3.2v9.6M3.2 8h9.6" />
+    </svg>
+  );
+}
+
+export function IconPlay({ size = 12 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="currentColor">
+      <path d="M5.5 3.6v8.8L13.2 8 5.5 3.6z" />
+    </svg>
+  );
+}
+
+export function IconStop({ size = 10 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="currentColor">
+      <rect x="4" y="4" width="8" height="8" rx="1.2" />
+    </svg>
+  );
+}
+
 export function IconSend({ size = 14 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
@@ -151,6 +175,22 @@ export function IconMosaic({ size = 14 }: { size?: number }) {
     <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round">
       <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" />
       <path d="M8 2.5v11M8 8h6.5" />
+    </svg>
+  );
+}
+
+export function IconUserMsg({ size = 12 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 3.5h10a1.5 1.5 0 0 1 1.5 1.5v5a1.5 1.5 0 0 1-1.5 1.5H7.5L4 14v-2.5H3A1.5 1.5 0 0 1 1.5 10V5A1.5 1.5 0 0 1 3 3.5z" />
+    </svg>
+  );
+}
+
+export function IconPaperclip({ size = 14 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M6.2 8.8l4.4-4.4a2.2 2.2 0 1 1 3.1 3.1L7.4 13.8a3.4 3.4 0 0 1-4.8-4.8l6.1-6.1" />
     </svg>
   );
 }

@@ -61,7 +61,7 @@ test.describe("F2 immersive chat", () => {
     await api.paneSendInput(
       sock,
       pane2.pane_id,
-      'echo "\u276f 帮我生成报告"; echo "\u23fa 运行 npm test"; echo "报告包含 **加粗结论** 与图片 tests/fixtures/sample.png"; echo \'```js\'; echo "const x = 1;"; echo \'```\'',
+      'echo "\u276f 帮我生成报告"; echo "\u23fa Bash(npm test)"; echo "报告包含 **加粗结论** 与图片 tests/fixtures/sample.png"; echo \'```js\'; echo "const x = 1;"; echo \'```\'',
     );
     await api.paneReportAgent(sock, pane2.pane_id, "e2e-fake", "working");
   }
@@ -105,7 +105,7 @@ test.describe("F2 immersive chat", () => {
     const { page } = ctx;
     const chip = page.getByTestId("chat-immersive").getByTestId("tool-chip").first();
     await expect(chip).toBeVisible();
-    await expect(chip).toContainText("npm");
+    await expect(chip).toContainText("Bash");
   });
 
   test("图片路径渲染为内联图片", async () => {

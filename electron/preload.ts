@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, webUtils } from "electron";
 
 const api = {
   invoke: (method: string, params: unknown, timeoutMs?: number) =>
@@ -17,6 +17,15 @@ const api = {
   fsTree: (dir: string, depth?: number) => ipcRenderer.invoke("fs:tree", dir, depth),
   fsRead: (path: string) => ipcRenderer.invoke("fs:read", path),
   fsOpen: (path: string) => ipcRenderer.invoke("fs:open", path),
+  pathForFile: (file: File) => {
+    try {
+      return webUtils.getPathForFile(file) || "";
+    } catch {
+      return "";
+    }
+  },
+  fsSaveTemp: (payload: { data: string; name?: string }) =>
+    ipcRenderer.invoke("fs:save-temp", payload),
   // V5 F2: git app (directory-scoped repository status / per-file diff)
   gitStatus: (cwd: string) => ipcRenderer.invoke("git:status", cwd),
   gitDiff: (cwd: string, path: string) => ipcRenderer.invoke("git:diff", cwd, path),

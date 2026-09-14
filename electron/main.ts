@@ -2,6 +2,7 @@ import { app, BrowserWindow, ipcMain, Notification, shell } from "electron";
 import { execFile } from "node:child_process";
 import * as path from "node:path";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import {
   HerdrClient,
   Subscription,
@@ -291,6 +292,7 @@ function registerIpc(): void {
   ipcMain.handle("fs:open", async (_e, p: string) => {
     return shell.openPath(p);
   });
+  ipcMain.handle("fs:save-temp", (_e, payload: { data: string; name?: string }) => saveTempImage(payload));
 
   // ---- V5 F2: Git app (status / diff via system git) ----
   ipcMain.handle("git:status", (_e, cwd: string) => runGitStatus(cwd));
@@ -522,6 +524,34 @@ export type FilePreview =
   | { kind: "text"; data: string; path: string }
   | { kind: "image"; data: string; path: string }
   | { kind: "other"; data: string; path: string };
+
+function saveTempImage(payload: { data?: string; name?: string }): string {
+  const data = typeof payload?.data === "string" ? payload.data : "";
+  const m = data.match(/^data:(image\/(?:png|jpe?g|gif|webp|bmp|svg\+xml));base64,([A-Za-z0-9+/=\s]+)$/i);
+  if (!m) throw new Error("invalid image data");
+  const mime = m[1].toLowerCase();
+  const buf = Buffer.from(m[2].replace(/\s+/g, ""), "base64");
+  if (!buf.length || buf.length > FS_MAX_IMAGE_BYTES) throw new Error("image too large");
+  const ext =
+    mime.includes("jpeg") || mime.includes("jpg")
+      ? ".jpg"
+      : mime.includes("gif")
+        ? ".gif"
+        : mime.includes("webp")
+          ? ".webp"
+          : mime.includes("bmp")
+            ? ".bmp"
+            : mime.includes("svg")
+              ? ".svg"
+              : ".png";
+  const rawName = path.basename(payload?.name || `paste-${Date.now()}${ext}`).replace(/[^\w.-]+/g, "_");
+  const name = rawName.toLowerCase().endsWith(ext) ? rawName : `${rawName}${ext}`;
+  const dir = path.join(os.tmpdir(), "herdr-studio-uploads");
+  fs.mkdirSync(dir, { recursive: true });
+  const dest = path.join(dir, `${Date.now()}-${name}`);
+  fs.writeFileSync(dest, buf);
+  return dest;
+}
 
 function readFilePreview(p: string): FilePreview {
   const ext = path.extname(p).toLowerCase();

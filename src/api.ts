@@ -55,6 +55,11 @@ export function paneSendText(paneId: string, text: string): Promise<unknown> {
   return rpc("pane.send_input", { pane_id: paneId, text, keys: ["enter"] });
 }
 
+/** Type into a pane; pass `keys` (e.g. enter) to also submit. */
+export function paneType(paneId: string, text: string, keys: string[] = []): Promise<unknown> {
+  return rpc("pane.send_input", { pane_id: paneId, text, keys });
+}
+
 export function paneSendKeys(paneId: string, keys: string[]): Promise<unknown> {
   return rpc("pane.send_keys", { pane_id: paneId, keys });
 }

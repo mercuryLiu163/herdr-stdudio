@@ -154,6 +154,8 @@ declare global {
       fsTree: (dir: string, depth?: number) => Promise<FsNode[] | { error: string }>;
       fsRead: (path: string) => Promise<FilePreview>;
       fsOpen: (path: string) => Promise<string>;
+      pathForFile: (file: File) => string;
+      fsSaveTemp: (payload: { data: string; name?: string }) => Promise<string>;
       gitStatus: (cwd: string) => Promise<GitStatus>;
       gitDiff: (cwd: string, path: string) => Promise<{ diff: string }>;
       onEvent: (cb: (ev: PushEvent) => void) => () => void;

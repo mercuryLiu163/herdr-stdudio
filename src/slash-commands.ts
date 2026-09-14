@@ -33,6 +33,18 @@ const CODEX: SlashCommand[] = [
   { cmd: "/help", desc: "显示可用命令" },
 ];
 
+const GROK: SlashCommand[] = [
+  { cmd: "/model", desc: "选择或切换模型" },
+  { cmd: "/effort", desc: "调整推理力度" },
+  { cmd: "/always-approve", desc: "切换 always-approve（Bypass）" },
+  { cmd: "/auto", desc: "切换 auto 权限模式" },
+  { cmd: "/plan", desc: "进入计划模式" },
+  { cmd: "/feedback", desc: "发送产品反馈" },
+  { cmd: "/status", desc: "查看会话与配置状态" },
+  { cmd: "/new", desc: "新会话" },
+  { cmd: "/help", desc: "显示可用命令" },
+];
+
 const GEMINI: SlashCommand[] = [
   { cmd: "/model", desc: "选择或切换模型" },
   { cmd: "/stats", desc: "查看会话统计" },
@@ -57,6 +69,7 @@ export function slashCommandsFor(agentKind: string | null | undefined): SlashCom
   const k = (agentKind ?? "").toLowerCase();
   if (k.includes("claude")) return CLAUDE;
   if (k.includes("codex")) return CODEX;
+  if (k.includes("grok")) return GROK;
   if (k.includes("gemini")) return GEMINI;
   return GENERIC;
 }
