@@ -198,7 +198,6 @@ async function runPaneStreams(states: PaneStreamState[]): Promise<void> {
  * poll `agent.list` and synthesize transition events for the renderer.
  */
 let lastAgentStatus = new Map<string, string>();
-let agentsObserved = false;
 
 function startAgentStatusWatcher(): void {
   setInterval(() => {
@@ -211,12 +210,15 @@ function startAgentStatusWatcher(): void {
         for (const a of agents) {
           seen.add(a.pane_id);
           const prev = lastAgentStatus.get(a.pane_id);
-          // Notify on any observed transition; a brand-new agent that already
-          // sits in blocked/done also warrants a notification (its earlier
-          // states were simply never observed by this poller).
-          const firstSeenNeedsNotice =
-            prev === undefined && (a.agent_status === "blocked" || a.agent_status === "done");
-          if (agentsObserved && (firstSeenNeedsNotice || (prev !== undefined && prev !== a.agent_status))) {
+          // Notify on ANY observed transition — including the first sight of a
+          // brand-new agent. F6 fix: the agent may have gone working→idle
+          // entirely between two polls (e.g. an E2E report pair), or the very
+          // first successful poll may only ever see the post-transition state;
+          // the renderer's last known status (learned from
+          // pane.agent_detected) would otherwise stay stale forever. The
+          // event only triggers a (debounced) snapshot refresh; user-facing
+          // notifications remain limited to blocked/done in the renderer.
+          if (prev === undefined || prev !== a.agent_status) {
             send("herdr:event", {
               event: "pane_agent_status_changed",
               data: { pane_id: a.pane_id, agent_status: a.agent_status },
@@ -227,7 +229,6 @@ function startAgentStatusWatcher(): void {
         for (const gone of [...lastAgentStatus.keys()]) {
           if (!seen.has(gone)) lastAgentStatus.delete(gone);
         }
-        agentsObserved = true;
       } catch {
         /* server down; retry next tick */
       }

@@ -50,6 +50,17 @@
   --shadow-pop: rgba(0, 0, 0, 0.3);
   --shadow-toast: rgba(0, 0, 0, 0.35);
 
+  /* F5 Double-Bezel: inner-core top highlight (glass machined into the shell) */
+  --inset-hi: rgba(255, 255, 255, 0.07);
+  /* F5 floating menu: large diffuse low-opacity shadow (no harsh drop shadows) */
+  --shadow-float: 0 18px 48px rgba(0, 0, 0, 0.32), 0 4px 14px rgba(0, 0, 0, 0.18);
+
+  /* F5 shared motion curve — every composer/toolbar transition uses this */
+  --ease-fluid: cubic-bezier(0.32, 0.72, 0, 1);
+  /* F5 send-orb glow (accent send / danger stop) */
+  --orb-glow-accent: 0 2px 6px rgba(217, 119, 87, 0.35);
+  --orb-glow-danger: 0 2px 6px rgba(224, 101, 95, 0.35);
+
   /* ansi palette (anser classes) */
   --ansi-black: #4a4945;
   --ansi-red: #e0655f;
@@ -138,6 +149,10 @@ html[data-theme="light"] {
   --shadow-card: rgba(0, 0, 0, 0.05);
   --shadow-pop: rgba(0, 0, 0, 0.08);
   --shadow-toast: rgba(0, 0, 0, 0.1);
+  --inset-hi: rgba(255, 255, 255, 0.85);
+  --shadow-float: 0 18px 48px rgba(0, 0, 0, 0.12), 0 4px 14px rgba(0, 0, 0, 0.06);
+  --orb-glow-accent: 0 2px 6px rgba(217, 119, 87, 0.25);
+  --orb-glow-danger: 0 2px 6px rgba(224, 101, 95, 0.25);
 
   /* ansi palette tuned for near-white surfaces */
   --ansi-black: #383838;
@@ -1097,6 +1112,40 @@ html[data-theme="light"] .chat-bubble {
   color: var(--text-faint);
   font-size: 12px;
   line-height: 1.6;
+}
+
+/* F6: live thinking row — all thinking blocks of a working turn merge into
+   this single row. The spinner is PURE CSS (transform keyframes only, F7.1:
+   never JS/frame driven). Rotation uses `linear` deliberately: it is a
+   continuous physical rotation, not a state transition — state transitions
+   use var(--ease-fluid). */
+.chat-thinking.live {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 2px 0;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+.thinking-spinner {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid var(--wash-5);
+  border-top-color: var(--accent);
+  flex-shrink: 0;
+  animation: ring-spin 0.8s linear infinite;
+  will-change: transform;
+}
+.thinking-live-label {
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+@keyframes ring-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 /* V7 F2: turn header is a centered pill sitting on a 1px hairline
@@ -2204,11 +2253,15 @@ body.mosaic-dragging .mosaic-cell-body {
   opacity: 0.4;
 }
 
+/* V8 status chips live inside the toolbar. M1 review: the group must NEVER be
+   squeezed by flex — an overflowing row scrolls (see .composer-toolbar-core),
+   it does not overlap. */
 .composer-status {
   display: flex;
   align-items: center;
-  gap: 2px;
-  min-width: 0;
+  gap: 1px;
+  flex-shrink: 0;
+  padding: 0 2px;
 }
 
 .composer-chip {
@@ -2216,13 +2269,20 @@ body.mosaic-dragging .mosaic-cell-body {
   align-items: center;
   gap: 5px;
   height: 26px;
-  padding: 0 8px;
+  padding: 0 6px;
   border-radius: 8px;
   background: transparent;
   color: var(--text-dim);
   font-size: 12px;
   font-weight: 500;
-  max-width: 160px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+/* ellipsis needs a block-ish text wrapper — raw text children of a flex
+   container never truncate (M1 review: chips used to overlap). */
+.composer-chip .chip-label {
+  min-width: 0;
+  max-width: 96px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2305,9 +2365,9 @@ body.mosaic-dragging .mosaic-cell-body {
 .composer-ctx {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  margin-left: 6px;
-  padding-left: 8px;
+  gap: 5px;
+  margin-left: 4px;
+  padding-left: 6px;
   border-left: 1px solid var(--border);
   font-size: 11.5px;
   color: var(--text-faint);
@@ -2390,6 +2450,307 @@ body.mosaic-dragging .mosaic-cell-body {
 }
 .composer-target:focus {
   background: var(--wash-3);
+}
+
+/* ============ F5 Composer 状态栏（Double-Bezel 分段胶囊） ============
+   外壳：wash 底 + 发丝 ring + 大圆角 + 内边距；内核：独立底色 + inset 高光 +
+   同心圆角；分段间发丝竖线。所有过渡一律 var(--ease-fluid)，按压 scale(0.98)，
+   动画只动 transform/opacity（GPU 安全）。 */
+.composer-toolbar {
+  position: relative; /* anchor for the shared toolbar-menu popup */
+  display: flex;
+  min-width: 0;
+  flex-shrink: 1;
+  padding: 3px; /* the machined shell lip */
+  border-radius: 999px;
+  background: var(--wash-1);
+  box-shadow: inset 0 0 0 1px var(--border); /* hairline ring, never a gray 1px border */
+}
+.composer-toolbar-core {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  min-width: 0;
+  width: 100%;
+  padding: 2px 4px;
+  border-radius: 999px; /* concentric with the shell */
+  background: var(--surface-raised);
+  box-shadow: inset 0 1px 1px var(--inset-hi); /* inner core top highlight */
+  /* M1 review safety net: every segment is flex-shrink:0, so a too-narrow
+     row scrolls instead of letting segments overlap. The scrollbar itself is
+     hidden — the capsule stays clean (mouse wheel / touchpad scrolls it). */
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.composer-toolbar-core::-webkit-scrollbar {
+  display: none;
+}
+/* 分段间发丝竖线 */
+.composer-toolbar-core > * + *:not(.tb-spring) {
+  border-left: 1px solid var(--border);
+}
+
+.tb-seg {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 999px;
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 500;
+  flex-shrink: 0;
+  min-width: 0;
+  transition:
+    background 0.18s var(--ease-fluid),
+    color 0.18s var(--ease-fluid),
+    transform 0.18s var(--ease-fluid),
+    opacity 0.18s var(--ease-fluid);
+}
+.tb-seg:first-child {
+  border-left: none;
+}
+.tb-seg:hover:not(:disabled) {
+  background: var(--wash-3);
+  color: var(--text);
+}
+.tb-seg:active:not(:disabled) {
+  transform: scale(0.98); /* physical press */
+}
+.tb-seg:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.tb-seg.on {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.tb-seg svg {
+  flex-shrink: 0;
+  opacity: 0.75;
+}
+.tb-seg .tb-seg-label {
+  min-width: 0;
+  max-width: 84px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tb-seg.tb-icon {
+  width: 26px;
+  justify-content: center;
+  padding: 0;
+}
+.tb-seg.tb-hint {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.tb-seg.tb-hint:hover:not(:disabled) {
+  color: var(--text-dim);
+}
+
+.tb-spring {
+  flex: 1;
+  min-width: 4px;
+  height: 1px;
+}
+
+/* V8 status chips now live inside the toolbar; keep them quiet */
+.composer-status {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  min-width: 0;
+  padding: 0 2px;
+}
+
+/* 状态环段：working=CSS 转圈 / idle 绿 / blocked 琥珀 / done 蓝 + 状态词 */
+.tb-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 6px;
+  flex-shrink: 0;
+  min-width: 0;
+}
+.tb-ring {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid var(--text-faint);
+  flex-shrink: 0;
+}
+.tb-status.s-working .tb-ring {
+  border-color: var(--accent);
+  border-right-color: transparent;
+  animation: ring-spin 0.9s linear infinite;
+  will-change: transform;
+}
+.tb-status.s-blocked .tb-ring {
+  border-color: var(--warn);
+}
+.tb-status.s-done .tb-ring {
+  border-color: var(--info);
+}
+.tb-status.s-idle .tb-ring {
+  border-color: var(--ok);
+}
+.tb-status-word {
+  font-size: 11.5px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+.tb-status.s-working .tb-status-word {
+  color: var(--accent);
+}
+.tb-status.s-idle .tb-status-word {
+  color: var(--ok);
+}
+.tb-status.s-blocked .tb-status-word {
+  color: var(--warn);
+}
+.tb-status.s-done .tb-status-word {
+  color: var(--info);
+}
+
+/* Button-in-Button 发送钮：主胶囊右端内嵌 28px 圆形 accent 钮；
+   hover 内圆位移微放大（内部动能张力），active 整钮 scale(0.98)。 */
+.send-bib {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 34px;
+  padding: 0 3px 0 10px;
+  border-radius: 999px;
+  background: var(--wash-4);
+  flex-shrink: 0;
+  transition:
+    background 0.18s var(--ease-fluid),
+    transform 0.18s var(--ease-fluid),
+    opacity 0.18s var(--ease-fluid);
+}
+.send-bib:hover:not(:disabled) {
+  background: var(--wash-5);
+}
+.send-bib:active:not(:disabled) {
+  transform: scale(0.98);
+}
+.send-bib:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.send-bib-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.send-bib:hover:not(:disabled) .send-bib-label {
+  color: var(--text);
+}
+.send-bib-orb {
+  width: 28px; /* PRD F5: 28px round accent button nested in the capsule end */
+  height: 28px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--accent);
+  color: var(--on-accent);
+  box-shadow:
+    inset 0 1px 1px var(--inset-hi),
+    var(--orb-glow-accent);
+  transition: transform 0.18s var(--ease-fluid);
+}
+.send-bib:hover:not(:disabled) .send-bib-orb {
+  transform: translate(1px, -1px) scale(1.06);
+}
+.send-bib.stop .send-bib-orb {
+  background: var(--danger);
+  box-shadow:
+    inset 0 1px 1px var(--inset-hi),
+    var(--orb-glow-danger);
+}
+
+/* F5 shared floating menu — glass panel, large diffuse low-opacity shadow,
+   160-220ms open on the shared curve (transform/opacity only). */
+.toolbar-menu {
+  position: absolute;
+  left: 6px;
+  bottom: calc(100% + 10px);
+  z-index: 45;
+  min-width: 216px;
+  max-width: 320px;
+  max-height: 288px;
+  overflow-y: auto;
+  padding: 4px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  box-shadow: var(--shadow-float);
+  transform-origin: bottom left;
+  animation: menu-in 0.18s var(--ease-fluid);
+}
+@keyframes menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(5px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+.tb-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border-radius: 8px;
+  text-align: left;
+  color: var(--text-dim);
+  font-size: 12.5px;
+  transition:
+    background 0.15s var(--ease-fluid),
+    color 0.15s var(--ease-fluid);
+}
+.tb-menu-item svg {
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+.tb-menu-item:hover,
+.tb-menu-item.active {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+/* m3 review: keyboard highlight (↑/↓) — distinct from `.active` (the currently
+   selected value), which keeps the accent tint. */
+.tb-menu-item.kb {
+  background: var(--wash-3);
+  color: var(--text);
+}
+.tb-menu-item .tb-menu-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tb-menu-item.mono .tb-menu-name {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.tb-menu-item .tb-menu-hint {
+  font-size: 11px;
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+.tb-menu-empty {
+  padding: 12px 10px;
+  font-size: 12px;
+  color: var(--text-faint);
 }
 
 .hint-key {

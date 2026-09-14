@@ -124,11 +124,33 @@ function isSeparatorLine(line: string): boolean {
  * shell noise rather than a chat prompt. Requires ≥2 echo segments: a single
  * `echo …` can be a legitimate prompt. Such prompt lines are dropped: the
  * echoed arguments would otherwise leak patterns like "Baked for 28s" into a
- * user block.
+ * user block. The split is quote-aware: a `;` inside `"…"` or `'…'` (e.g.
+ * `echo "const x = 1;"`) is literal text, not a segment separator.
  */
 function isEchoChain(rest: string): boolean {
   if (!/echo/.test(rest)) return false;
-  const segs = rest.split(";");
+  const segs: string[] = [];
+  let cur = "";
+  let quote: string | null = null;
+  for (const ch of rest) {
+    if (quote) {
+      cur += ch;
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      cur += ch;
+      continue;
+    }
+    if (ch === ";") {
+      segs.push(cur);
+      cur = "";
+      continue;
+    }
+    cur += ch;
+  }
+  segs.push(cur);
   if (segs.length < 2) return false;
   return segs.every((seg) => /^\s*echo\b/.test(seg));
 }
@@ -559,6 +581,12 @@ function joinSoftWrap(prev: string, next: string): string | null {
   const p = prev.trimEnd();
   const n = next.trim();
   if (!p || !n || isNewBlockLine(n)) return null;
+  // A structural block line is a wrap boundary, never a mid-word wrap source:
+  // a markdown list/heading/URL/indented continuation line (V7 F1) would
+  // otherwise swallow the next block (gluing "已完成。总结如下:" onto
+  // "- 截图:…" hid the assistant reply inside the user card), and a fence
+  // line (```js) would absorb its first body line and destroy the code block.
+  if (isUserContinuation(p) || /^`{3,}/.test(p.trim())) return null;
   if (/^[❯›>]/.test(p.trim()) || extractUserInput(p.trim()) !== null) return null;
   if (/[。！？.!?]$/.test(p)) return null;
   if (/\.[A-Za-z0-9]{1,8}$/.test(p)) return null;

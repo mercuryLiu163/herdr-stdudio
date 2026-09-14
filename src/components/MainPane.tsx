@@ -1,15 +1,23 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, useReducer } from "react";
 import type { CSSProperties, MouseEvent as ReactMouseEvent } from "react";
 import { useStore, agentForPane, agentDisplayName } from "../store";
 import { AnsiView } from "../ansi";
-import { parseTranscript, groupTurns, turnStats, looksLikeChat, extractComposerStatus, IMAGE_EXT_RE } from "../chat-parser";
+import {
+  parseTranscript,
+  groupTurns,
+  turnStats,
+  looksLikeChat,
+  extractComposerStatus,
+  formatDurationSeconds,
+  IMAGE_EXT_RE,
+} from "../chat-parser";
 import type { Block, Turn } from "../chat-parser";
 import { renderMarkdown, highlightCode } from "../markdown";
 import type { PaneLayout, PaneLayoutEntry, PaneRect } from "../types";
 import { paneLayout, paneResize, agentPrompt, paneSendText, paneSendKeys, agentSendKeys, paneType } from "../api";
 import { slashCommandsFor, filterSlashCommands } from "../slash-commands";
 import { IconBook, IconClock, IconFile, IconPlay, IconPlus, IconStop, IconTerminal, IconUserMsg } from "./icons";
-import { IconChevron, IconColumns, IconMosaic } from "./icons";
+import { IconChevron, IconColumns, IconMosaic, IconPaperclip } from "./icons";
 
 const statusLabel: Record<string, string> = {
   working: "工作中",
@@ -219,7 +227,7 @@ export function MainPane() {
       ) : (
         <OutputReader onSwitchToChat={() => pickView("chat")} />
       )}
-      <Composer />
+      <Composer view={view} onView={pickView} />
     </div>
   );
 }
@@ -237,9 +245,18 @@ function OutputReader({ onSwitchToChat }: { onSwitchToChat?: () => void }) {
   const agent = agentForPane(agents, paneId);
 
   // Stick to bottom while streaming, unless the user scrolled up to read.
+  // F7.3: the pin is scheduled on the next animation frame — the text tick
+  // itself never reads scrollHeight synchronously (no layout thrash while
+  // tokens stream).
+  const stickRaf = useRef(0);
   useEffect(() => {
-    const el = wrapRef.current;
-    if (el && stick.current) el.scrollTop = el.scrollHeight;
+    if (!stick.current) return;
+    cancelAnimationFrame(stickRaf.current);
+    stickRaf.current = requestAnimationFrame(() => {
+      const el = wrapRef.current;
+      if (el && stick.current) el.scrollTop = el.scrollHeight;
+    });
+    return () => cancelAnimationFrame(stickRaf.current);
   }, [output?.text, paneId]);
 
   useEffect(() => {
@@ -388,10 +405,17 @@ function ChatView() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
 
-  // Follow streaming output while pinned to the bottom.
+  // Follow streaming output while pinned to the bottom (F7.3: rAF-scheduled —
+  // the text tick never reads layout synchronously).
+  const stickRaf = useRef(0);
   useEffect(() => {
-    const el = scrollRef.current;
-    if (el && stick.current) el.scrollTop = el.scrollHeight;
+    if (!stick.current) return;
+    cancelAnimationFrame(stickRaf.current);
+    stickRaf.current = requestAnimationFrame(() => {
+      const el = scrollRef.current;
+      if (el && stick.current) el.scrollTop = el.scrollHeight;
+    });
+    return () => cancelAnimationFrame(stickRaf.current);
   }, [output?.text, paneId]);
 
   useEffect(() => {
@@ -430,7 +454,14 @@ function ChatView() {
             <div className="chat-empty">读取输出失败。窗格可能刚刚关闭，或处于 alternate screen。</div>
           </div>
         ) : output?.text ? (
-          <ChatThread text={output.text} cwd={cwd} cwds={cwds} agent={agent} updatedAt={output.updatedAt} />
+          <ChatThread
+            text={output.text}
+            cwd={cwd}
+            cwds={cwds}
+            agent={agent}
+            updatedAt={output.updatedAt}
+            working={agent?.agent_status === "working"}
+          />
         ) : output?.loading || status !== "connected" ? (
           <div className="chat-thread" data-testid="chat-thread">
             <div className="chat-empty">正在读取输出…</div>
@@ -465,12 +496,14 @@ function ChatThread({
   cwds,
   agent,
   updatedAt,
+  working,
 }: {
   text: string;
   cwd: string | null;
   cwds: string[];
   agent: ReturnType<typeof agentForPane>;
   updatedAt: number;
+  working: boolean;
 }) {
   const blocks = useMemo(() => parseTranscript(text), [text]);
   const turns = useMemo(() => groupTurns(blocks), [blocks]);
@@ -486,7 +519,6 @@ function ChatThread({
       return next;
     });
   };
-  const clock = hhmmss(updatedAt);
   return (
     <div className="chat-thread" data-testid="chat-thread">
       {turns.length === 0 && <div className="chat-empty">暂无对话内容。</div>}
@@ -497,7 +529,8 @@ function ChatThread({
           cwd={cwd}
           cwds={cwds}
           agent={agent}
-          clock={clock}
+          updatedAt={updatedAt}
+          working={working && ti === turns.length - 1}
           collapsed={collapsed.has(ti)}
           onToggle={() => toggleTurn(ti)}
         />
@@ -515,6 +548,49 @@ function hhmmss(ms: number): string {
 }
 
 /**
+ * F7.2 the isolated seconds clock. The turn-header time is its OWN component
+ * with a private 1s interval + local state, memo-isolated from the streaming
+ * text: a pane output tick re-renders ChatThread/ChatTurn but this component
+ * (and therefore its DOM node) is untouched unless `updatedAt` itself moved
+ * across a second. This is what keeps the clock's DOM identity stable while
+ * tokens stream.
+ */
+const Elapsed = memo(
+  function Elapsed({ updatedAt }: { updatedAt: number }) {
+    // Private 1s heartbeat: keeps the clock self-driven so it never depends
+    // on (nor contributes to) the parent's streaming re-render cycle.
+    const [, setHeartbeat] = useReducer((n: number) => n + 1, 0);
+    useEffect(() => {
+      const t = window.setInterval(() => setHeartbeat(), 1000);
+      return () => window.clearInterval(t);
+    }, []);
+    return <>{hhmmss(updatedAt)}</>;
+  },
+  (a, b) => hhmmss(a.updatedAt) === hhmmss(b.updatedAt),
+);
+
+/**
+ * F6 the live thinking row. While the agent is working, every thinking block
+ * of the turn merges into THIS single row (spinner = pure CSS transform
+ * keyframes, never JS-driven) + "思考中 Ns"; when the turn ends the row is
+ * replaced by the frozen per-block 思考 rows again.
+ */
+function ThinkingLive({ blocks }: { blocks: Block[] }) {
+  const total = blocks.reduce((sum, b) => {
+    const m = b.text.match(/([\d.]+)\s*s/i);
+    return m ? sum + parseFloat(m[1]) : sum;
+  }, 0);
+  return (
+    <div className="chat-thinking live" data-testid="thinking-live" title="Agent 正在思考 — 流式思考已实时合并">
+      <span className="thinking-spinner" data-testid="thinking-spinner" aria-hidden />
+      <span className="thinking-live-label">
+        思考中{total > 0 ? ` ${formatDurationSeconds(total)}` : "…"}
+      </span>
+    </div>
+  );
+}
+
+/**
  * One conversation turn (V5 F1): the user prompt, then a header bar with the
  * agent avatar + display name + last-updated clock + derived stat chips
  * (steps / files / duration — only when derivable), then the agent's blocks,
@@ -526,7 +602,8 @@ function ChatTurn({
   cwd,
   cwds,
   agent,
-  clock,
+  updatedAt,
+  working,
   collapsed,
   onToggle,
 }: {
@@ -534,7 +611,8 @@ function ChatTurn({
   cwd: string | null;
   cwds: string[];
   agent: ReturnType<typeof agentForPane>;
-  clock: string;
+  updatedAt: number;
+  working: boolean;
   collapsed: boolean;
   onToggle: () => void;
 }) {
@@ -543,6 +621,32 @@ function ChatTurn({
   const name = agent ? agentDisplayName(agent) || kind : "agent";
   const initial = (kind[0] ?? "A").toUpperCase();
   const hasBody = turn.body.length > 0 || stats.files.length > 0;
+  // F6: while the agent is working, thinking blocks of the ONGOING (latest,
+  // non-terminated) turn merge into ONE live row rendered at the LAST thinking
+  // position; the individual blocks disappear (思考内容 never unfolds line by
+  // line while streaming). ChatThread only marks the LAST turn as working —
+  // history never revives the spinner. A turn that already carries its
+  // duration meta ("Worked for 28s") has ENDED — its thinking is settled
+  // history and stays a frozen collapsible 思考 row (V4 F1 contract).
+  const turnLive = working && stats.duration === null;
+  const bodyBlocks: Array<{ block: Block | null; live: Block[] | null }> = [];
+  if (turnLive) {
+    const thinkIdx: number[] = [];
+    turn.body.forEach((b, i) => {
+      if (b.type === "thinking") thinkIdx.push(i);
+    });
+    const lastThink = thinkIdx.length ? thinkIdx[thinkIdx.length - 1] : -1;
+    turn.body.forEach((b, i) => {
+      if (b.type === "thinking") {
+        if (i === lastThink) bodyBlocks.push({ block: null, live: thinkIdx.map((j) => turn.body[j]) });
+        else bodyBlocks.push({ block: null, live: null });
+      } else {
+        bodyBlocks.push({ block: b, live: null });
+      }
+    });
+  } else {
+    for (const b of turn.body) bodyBlocks.push({ block: b, live: null });
+  }
   return (
     <section className="chat-turn" data-testid="chat-turn">
       {turn.users.map((b, i) => (
@@ -566,9 +670,9 @@ function ChatTurn({
             {initial}
           </span>
           <span className="turn-agent">{name}</span>
-          {clock && (
+          {!!updatedAt && (
             <span className="turn-time" title="最后活动：本窗格输出流的最新更新时间">
-              {clock}
+              <Elapsed updatedAt={updatedAt} />
             </span>
           )}
           {stats.duration && (
@@ -595,7 +699,13 @@ function ChatTurn({
       </div>
       )}
       {!collapsed &&
-        turn.body.map((b, bi) => <ChatBlock key={`b${bi}`} block={b} cwd={cwd} cwds={cwds} />)}
+        bodyBlocks.map((entry, bi) =>
+          entry.live ? (
+            <ThinkingLive key={`live${bi}`} blocks={entry.live} />
+          ) : entry.block ? (
+            <ChatBlock key={`b${bi}`} block={entry.block} cwd={cwd} cwds={cwds} />
+          ) : null,
+        )}
       {!collapsed && stats.files.length > 0 && <TurnFilesCard files={stats.files} />}
     </section>
   );
@@ -1239,6 +1349,36 @@ const EFFORT_OPTIONS = [
   { id: "xhigh", label: "xHigh", cmd: "/effort xhigh" },
 ] as const;
 
+/**
+ * F5 model presets per agent kind (segment 模型 ∨). Each entry is sent
+ * verbatim as `/model <id>` through the V4 slash channel — the label shown in
+ * the menu ends with the id so what the user reads is exactly what is sent.
+ * Unknown kinds fall back to a single honest entry (no invented models).
+ */
+const MODEL_PRESETS: Record<string, string[]> = {
+  claude: ["claude-opus-4-5", "claude-sonnet-4-5", "claude-haiku-4-5"],
+  codex: ["gpt-5.2", "gpt-5.2-codex", "gpt-5.2-mini"],
+  grok: ["grok-4.6", "grok-4.6-fast", "grok-4.6-mini"],
+  gemini: ["gemini-3-pro", "gemini-3-flash"],
+};
+
+function modelPresetsFor(kind: string | null | undefined): string[] {
+  const k = (kind ?? "").toLowerCase();
+  for (const key of Object.keys(MODEL_PRESETS)) {
+    if (k.includes(key)) return MODEL_PRESETS[key];
+  }
+  return ["default"];
+}
+
+/** Short status word for the F5 toolbar status ring (the long form lives in the header). */
+const STATUS_WORD: Record<string, string> = {
+  working: "工作中",
+  idle: "空闲",
+  blocked: "待确认",
+  done: "完成",
+  unknown: "已接入",
+};
+
 type ModeId = "ask" | "auto" | "plan" | "bypass";
 
 const MODE_OPTIONS: Array<{ id: ModeId; label: string; cmd: string; hint: string; tone: string }> = [
@@ -1294,7 +1434,14 @@ function readFileAsDataUrl(file: File): Promise<string> {
   });
 }
 
-function Composer() {
+type ToolbarMenuId = "tb-attach" | "tb-target" | "tb-view" | "tb-model";
+
+/** Narrow the shared popup state to the F5 toolbar menus. */
+function isTbMenu(m: null | "mode" | "effort" | ToolbarMenuId): m is ToolbarMenuId {
+  return m === "tb-attach" || m === "tb-target" || m === "tb-view" || m === "tb-model";
+}
+
+function Composer({ view, onView }: { view: ViewMode; onView: (v: ViewMode) => void }) {
   const layoutMode = useStore((s) => s.layoutMode);
   const paneId = useStore((s) => s.activePaneId);
   const panes = useStore((s) => s.panes);
@@ -1320,10 +1467,17 @@ function Composer() {
   // keeping the text in the input does not re-open the palette.
   const [slashOpen, setSlashOpen] = useState(false);
   const [slashIdx, setSlashIdx] = useState(0);
-  const [openMenu, setOpenMenu] = useState<null | "mode" | "effort">(null);
+  // F5: one shared popup state for the whole toolbar — the V8 chips keep their
+  // own legacy ids ("mode"/"effort"), the new segments use "tb-*".
+  const [openMenu, setOpenMenu] = useState<null | "mode" | "effort" | ToolbarMenuId>(null);
+  /** Keyboard highlight within the open tb menu (m3 review). */
+  const [tbIdx, setTbIdx] = useState(0);
   const [modeOver, setModeOver] = useState<ModeId | null>(null);
   const [effortOver, setEffortOver] = useState<string | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  // F5 引用文件: first-level file entries of the tab's pane cwds, loaded when
+  // the attach popup opens.
+  const [tbFiles, setTbFiles] = useState<Array<{ name: string; path: string }>>([]);
 
   const slashItems = useMemo(() => {
     if (!agent || !slashOpen) return [];
@@ -1341,10 +1495,34 @@ function Composer() {
     taRef.current?.focus();
   };
 
-  // F3 input-target dropdown options (unified mode only). `paneId` doubles as
-  // the selected target so the dropdown and cell clicks stay in sync.
+  /**
+   * F5 引用文件/attach: insert at the textarea cursor, not the tail — the
+   * caret position survives through selectionStart/End and is restored after
+   * the controlled state update.
+   */
+  const insertAtCursor = useCallback(
+    (ins: string) => {
+      const ta = taRef.current;
+      if (!ta) {
+        setText((prev) => prev + ins);
+        return;
+      }
+      const start = ta.selectionStart ?? text.length;
+      const end = ta.selectionEnd ?? start;
+      const next = text.slice(0, start) + ins + text.slice(end);
+      setText(next);
+      requestAnimationFrame(() => {
+        ta.focus();
+        ta.setSelectionRange(start + ins.length, start + ins.length);
+      });
+    },
+    [text],
+  );
+
+  // F5 input-target dropdown options (every mode — separate mode uses the
+  // toolbar-target segment, unified mode ALSO keeps the legacy select; both
+  // bind the same activePaneId field, so they stay in sync for free).
   const targetOptions = useMemo(() => {
-    if (layoutMode !== "unified") return [];
     return panes
       .filter((p) => p.tab_id === activeTabId)
       .map((p) => {
@@ -1352,7 +1530,7 @@ function Composer() {
         const shortId = p.pane_id.split(":p")[1] ?? "";
         return { paneId: p.pane_id, label: a ? agentDisplayName(a) : `shell ${shortId}` };
       });
-  }, [layoutMode, panes, agents, activeTabId]);
+  }, [panes, agents, activeTabId]);
 
   const canSend =
     paneId !== null && (text.trim().length > 0 || atts.length > 0) && !sending && status !== "no-server";
@@ -1443,6 +1621,8 @@ function Composer() {
     try {
       if (agent) await agentSendKeys(agent.pane_id, keys);
       else await paneSendKeys(paneId, keys);
+      // Toast confirms the key actually went out (D6 contract: esc toast).
+      pushToast("info", `已发送 ${keys.join(" ")}`);
       setTimeout(() => void refreshPane(paneId), 300);
     } catch (err: any) {
       pushToast("error", `发送按键失败：${err?.message ?? ""}`);
@@ -1458,6 +1638,154 @@ function Composer() {
       pushToast("error", err?.message ?? "发送失败");
     }
   };
+
+  // ---- F5 toolbar segments ----
+
+  /** 引用文件: first-level file entries across the tab's pane cwds. */
+  const openTbAttach = async () => {
+    if (openMenu === "tb-attach") {
+      setOpenMenu(null);
+      return;
+    }
+    setOpenMenu("tb-attach");
+    // m4 review: drop the previous listing FIRST so a slow fs walk never
+    // flashes the stale files of another tab/pane.
+    setTbFiles([]);
+    const roots: string[] = [];
+    for (const p of panes) {
+      if (p.tab_id !== activeTabId) continue;
+      const c = (p.cwd ?? "").trim();
+      if (c && !roots.includes(c)) roots.push(c);
+    }
+    const files: Array<{ name: string; path: string }> = [];
+    for (const root of roots) {
+      try {
+        const tree = await window.herdr.fsTree(root, 1);
+        if (!Array.isArray(tree)) continue;
+        for (const node of tree) {
+          if (node.type !== "file") continue;
+          if (!files.some((f) => f.path === node.path)) files.push({ name: node.name, path: node.path });
+        }
+      } catch {
+        /* unreadable root — skip it */
+      }
+    }
+    setTbFiles(files.slice(0, 40));
+  };
+
+  /** F5 模型: pick a preset → send `/model <id>` through the V4 slash channel. */
+  const pickTbModel = (id: string) => {
+    setOpenMenu(null);
+    void sendSlash(`/model ${id}`);
+  };
+
+  const presets = useMemo(() => modelPresetsFor(agent?.agent), [agent?.agent]);
+  const modelText = sessionBar.model || (agent ? agent.agent : "");
+  const agentStatus = agent?.agent_status;
+  const working = agentStatus === "working" || agentStatus === "blocked";
+  const statusWord = agent ? (STATUS_WORD[agentStatus ?? "unknown"] ?? agentStatus ?? "—") : "终端";
+
+  // ---- m3 review: keyboard support for the shared toolbar menu ----
+  // The open menu is flattened into data so ↑/↓/Enter act on the same list the
+  // mouse clicks (rendered below). NOTE: model items keep `label` as their
+  // ONLY text — the F5 contract extracts the model id from textContent.
+  interface TbItem {
+    key: string;
+    label: string;
+    hint?: string;
+    icon: "file" | "pane" | null;
+    mono?: boolean;
+    title?: string;
+    active: boolean;
+    run: () => void;
+  }
+  let tbItems: TbItem[] = [];
+  if (isTbMenu(openMenu)) {
+    if (openMenu === "tb-attach") {
+      tbItems = tbFiles.map((f) => ({
+        key: f.path,
+        label: f.name,
+        icon: "file" as const,
+        title: f.path,
+        active: false,
+        run: () => {
+          setOpenMenu(null);
+          insertAtCursor(atRef(f.name) + " ");
+        },
+      }));
+    } else if (openMenu === "tb-target") {
+      tbItems = targetOptions.map((o) => ({
+        key: o.paneId,
+        label: o.label,
+        icon: "pane" as const,
+        title: o.paneId,
+        active: o.paneId === paneId,
+        run: () => {
+          setOpenMenu(null);
+          selectPane(o.paneId);
+        },
+      }));
+    } else if (openMenu === "tb-view") {
+      tbItems = (
+        [
+          { id: "chat" as ViewMode, label: "对话", hint: "重排数据流" },
+          { id: "raw" as ViewMode, label: "原始输出", hint: "终端转写" },
+        ] as const
+      ).map((o) => ({
+        key: o.id,
+        label: o.label,
+        hint: o.hint,
+        icon: null,
+        active: view === o.id,
+        run: () => {
+          setOpenMenu(null);
+          onView(o.id);
+        },
+      }));
+    } else {
+      tbItems = presets.map((id) => ({
+        key: id,
+        label: id,
+        icon: null,
+        mono: true,
+        active: id === modelText,
+        run: () => pickTbModel(id),
+      }));
+    }
+  }
+  const tbHl = Math.min(tbIdx, Math.max(0, tbItems.length - 1));
+
+  useEffect(() => {
+    setTbIdx(0);
+  }, [openMenu]);
+
+  useEffect(() => {
+    if (!isTbMenu(openMenu) || tbItems.length === 0) return;
+    // Capture phase: consume the keys BEFORE the textarea's own handler, so a
+    // menu never co-fires a send (Enter) while it is open.
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        e.stopPropagation();
+        setTbIdx((i) => (i + 1) % tbItems.length);
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        e.stopPropagation();
+        setTbIdx((i) => (i - 1 + tbItems.length) % tbItems.length);
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        e.stopPropagation();
+        tbItems[Math.min(tbIdx, tbItems.length - 1)]?.run();
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        setOpenMenu(null);
+      }
+    };
+    document.addEventListener("keydown", onKey, true);
+    return () => document.removeEventListener("keydown", onKey, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openMenu, tbItems, tbIdx]);
 
   useEffect(() => {
     setModeOver(null);
@@ -1480,12 +1808,10 @@ function Composer() {
   }, [openMenu]);
 
   const grokLike = !!agent && /grok/i.test(agent.agent);
-  const modelText = sessionBar.model || (agent ? agent.agent : "");
   const effortId = effortOver ?? sessionBar.effort ?? (grokLike ? "medium" : undefined);
   const effortText = effortLabel(effortId);
   const modeId = modeOver ?? (agent ? modeIdOf(sessionBar.mode) : undefined);
   const modeOpt = MODE_OPTIONS.find((m) => m.id === modeId);
-  const working = agent?.agent_status === "working" || agent?.agent_status === "blocked";
 
   const pickEffort = (id: string, cmd: string) => {
     setEffortOver(id);
@@ -1646,16 +1972,223 @@ function Composer() {
               e.target.value = "";
             }}
           />
-          <button
-            type="button"
-            className="composer-plus"
-            data-testid="composer-attach"
-            disabled={!paneId || status === "no-server"}
-            title="上传图片（也可拖放或粘贴）"
-            onClick={() => fileRef.current?.click()}
-          >
-            <IconPlus size={14} />
-          </button>
+          {/* F5 Double-Bezel 状态栏：外壳 wash 底 + 发丝 ring + 大圆角，内核独立底色 +
+              inset 高光 + 同心圆角；分段间发丝竖线。V8 的 composer status chips
+              合并为其中一个分段（NOTE: composer-status 等既有 testid 全部保留）。 */}
+          <div className="composer-toolbar" data-testid="composer-toolbar" ref={menuRef}>
+            <div className="composer-toolbar-core">
+              {/* 1) 引用文件：cwd 一级文件浅列表，点选插入 @相对路径 */}
+              <button
+                type="button"
+                className={`tb-seg${openMenu === "tb-attach" ? " on" : ""}`}
+                data-testid="toolbar-attach"
+                disabled={!paneId || status === "no-server"}
+                title="引用文件（插入 @相对路径）"
+                onClick={() => void openTbAttach()}
+              >
+                <IconPaperclip size={13} />
+                <span className="tb-seg-label">引用</span>
+              </button>
+              {/* 2) 图片上传（V8 契约保留，并入工具条） */}
+              <button
+                type="button"
+                className="tb-seg tb-icon"
+                data-testid="composer-attach"
+                disabled={!paneId || status === "no-server"}
+                title="上传图片（也可拖放或粘贴）"
+                onClick={() => fileRef.current?.click()}
+              >
+                <IconPlus size={13} />
+              </button>
+              {/* 3) 目标 ∨：当前 tab 全部 pane（与 input-target 同字段双向同步） */}
+              {targetOptions.length > 0 && (
+                <button
+                  type="button"
+                  className={`tb-seg${openMenu === "tb-target" ? " on" : ""}`}
+                  data-testid="toolbar-target"
+                  disabled={!paneId || status === "no-server"}
+                  title="输入目标：发送到哪个窗格"
+                  onClick={() => setOpenMenu(openMenu === "tb-target" ? null : "tb-target")}
+                >
+                  <span className="tb-seg-label">
+                    {targetOptions.find((o) => o.paneId === paneId)?.label ?? "目标"}
+                  </span>
+                  <IconChevron size={9} />
+                </button>
+              )}
+              {/* 4) 视图 ∨：与既有 view 分段同字段（统一布局无对话/原始之分，不放假功能） */}
+              {layoutMode === "separate" && (
+                <button
+                  type="button"
+                  className={`tb-seg${openMenu === "tb-view" ? " on" : ""}`}
+                  data-testid="toolbar-view"
+                  title="视图：对话 / 原始输出"
+                  onClick={() => setOpenMenu(openMenu === "tb-view" ? null : "tb-view")}
+                >
+                  <span className="tb-seg-label">{view === "chat" ? "对话" : "原始"}</span>
+                  <IconChevron size={9} />
+                </button>
+              )}
+              {/* 5) 模型 ∨（仅 agent）：该 kind 模型预设，选择即发送 /model <名>。
+                 composer-model（V8）作为只读当前模型文案并入本段。 */}
+              {agent && modelText && (
+                <button
+                  type="button"
+                  className={`tb-seg${openMenu === "tb-model" ? " on" : ""}`}
+                  data-testid="toolbar-model"
+                  title={`模型 ${modelText} — 选择预设即发送 /model <名>`}
+                  onClick={() => setOpenMenu(openMenu === "tb-model" ? null : "tb-model")}
+                >
+                  <span className="tb-seg-label" data-testid="composer-model">
+                    {modelText}
+                  </span>
+                  <IconChevron size={9} />
+                </button>
+              )}
+              {/* 6) V8 状态 chips（effort / mode / ctx）— composer-status 分段 */}
+              <div className="composer-status" data-testid="composer-status">
+                {effortText && (
+                  <div className="composer-menu">
+                    <button
+                      type="button"
+                      className={`composer-chip tone-${effortId === "high" || effortId === "xhigh" ? "warn" : effortId === "low" ? "dim" : "ok"}`}
+                      data-testid="composer-effort"
+                      title="推理力度"
+                      onClick={() => setOpenMenu(openMenu === "effort" ? null : "effort")}
+                    >
+                      <span className="composer-dot" aria-hidden />
+                      <span className="chip-label">{effortText}</span>
+                      <IconChevron size={9} />
+                    </button>
+                    {openMenu === "effort" && (
+                      <div className="composer-menu-pop" data-testid="composer-effort-menu" role="menu">
+                        {EFFORT_OPTIONS.map((opt) => (
+                          <button
+                            type="button"
+                            key={opt.id}
+                            role="menuitem"
+                            className={`composer-menu-item${opt.id === effortId ? " active" : ""}`}
+                            onClick={() => pickEffort(opt.id, opt.cmd)}
+                          >
+                            {opt.label}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+                {modeOpt && (
+                  <div className="composer-menu">
+                    <button
+                      type="button"
+                      className={`composer-chip tone-${modeOpt.tone}`}
+                      data-testid="composer-mode"
+                      title="/always-approve"
+                      onClick={() => setOpenMenu(openMenu === "mode" ? null : "mode")}
+                    >
+                      <span className="composer-dot" aria-hidden />
+                      <span className="chip-label">{modeOpt.label}</span>
+                      <IconChevron size={9} />
+                    </button>
+                    {openMenu === "mode" && (
+                      <div className="composer-menu-pop" data-testid="composer-mode-menu" role="menu">
+                        {MODE_OPTIONS.map((opt) => (
+                          <button
+                            type="button"
+                            key={opt.id}
+                            role="menuitem"
+                            className={`composer-menu-item tone-${opt.tone}${opt.id === modeId ? " active" : ""}`}
+                            onClick={() => pickMode(opt.id, opt.cmd)}
+                          >
+                            <span>
+                              <span className="composer-dot" aria-hidden />
+                              {opt.label}
+                            </span>
+                            <span className="hint">{opt.hint}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+                {sessionBar.ctx && (
+                  <span className="composer-ctx" data-testid="composer-ctx" title="上下文用量">
+                    <span className="composer-ctx-bar" aria-hidden>
+                      <i style={{ width: sessionBar.ctx }} />
+                    </span>
+                    {sessionBar.ctx}
+                  </span>
+                )}
+              </div>
+              <span className="tb-spring" aria-hidden />
+              {/* 7) 状态环：working=CSS 转圈 / idle 绿 / blocked 琥珀 / done 蓝 */}
+              <div
+                className={`tb-status s-${agentStatus ?? "shell"}`}
+                data-testid="toolbar-status"
+                title={agent ? (statusLabel[agentStatus ?? ""] ?? agentStatus ?? "") : "普通终端"}
+              >
+                {working ? (
+                  <span className="tb-ring spin" aria-hidden />
+                ) : (
+                  <span className="tb-ring" aria-hidden />
+                )}
+                <span className="tb-status-word">{statusWord}</span>
+              </div>
+              {/* Esc 中断（D6 契约）：向前台程序发送 Esc */}
+              <button
+                type="button"
+                className="tb-seg tb-hint"
+                data-testid="composer-esc"
+                disabled={!paneId || status === "no-server"}
+                title="向前台程序发送 Esc"
+                onClick={() => void interrupt(["esc"])}
+              >
+                Esc 中断
+              </button>
+              {/* 8) Button-in-Button 发送钮：主胶囊右端内嵌 28px 圆形 accent 钮 */}
+              <button
+                type="button"
+                className={`send-bib${working ? " stop" : ""}`}
+                data-testid="send-button"
+                title={working ? "中断（Ctrl+C）" : agent ? "发送" : "执行"}
+                disabled={!paneId || (!working && !canSend && !sending)}
+                onClick={() => (working ? void interrupt(["ctrl+c"]) : void send())}
+              >
+                <span className="send-bib-label">{working ? "中断" : sending ? "发送中" : "发送"}</span>
+                <span className="send-bib-orb" aria-hidden>
+                  {working ? <IconStop size={9} /> : <IconPlay size={11} />}
+                </span>
+              </button>
+            </div>
+            {isTbMenu(openMenu) && (
+              <div className="toolbar-menu" data-testid="toolbar-menu" role="menu">
+                {tbItems.length === 0 && <div className="tb-menu-empty">当前目录没有可引用的文件</div>}
+                {tbItems.map((item, i) => (
+                  <button
+                    type="button"
+                    key={item.key}
+                    role="menuitem"
+                    className={`tb-menu-item${item.mono ? " mono" : ""}${item.active ? " active" : ""}${i === tbHl ? " kb" : ""}`}
+                    data-testid="toolbar-menu-item"
+                    title={item.title}
+                    // keep textarea focus on click (mousedown would blur it)
+                    onMouseDown={(e) => e.preventDefault()}
+                    onMouseEnter={() => setTbIdx(i)}
+                    ref={(el) => {
+                      // keyboard highlight stays in view (slash-palette parity)
+                      if (i === tbHl) el?.scrollIntoView({ block: "nearest" });
+                    }}
+                    onClick={item.run}
+                  >
+                    {item.icon === "file" && <IconFile size={12} />}
+                    {item.icon === "pane" && <IconTerminal size={12} />}
+                    <span className="tb-menu-name">{item.label}</span>
+                    {item.hint && <span className="tb-menu-hint">{item.hint}</span>}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
           {layoutMode === "unified" && targetOptions.length > 0 && (
             <select
               className="composer-target"
@@ -1672,124 +2205,11 @@ function Composer() {
               ))}
             </select>
           )}
-          <div className="composer-status" data-testid="composer-status" ref={menuRef}>
-            {modelText && (
-              <button
-                type="button"
-                className="composer-chip"
-                data-testid="composer-model"
-                disabled={!agent}
-                title="切换模型"
-                onClick={() => {
-                  setOpenMenu(null);
-                  void sendSlash("/model");
-                }}
-              >
-                {modelText}
-                <IconChevron size={10} />
-              </button>
-            )}
-            {effortText && (
-              <div className="composer-menu">
-                <button
-                  type="button"
-                  className={`composer-chip tone-${effortId === "high" || effortId === "xhigh" ? "warn" : effortId === "low" ? "dim" : "ok"}`}
-                  data-testid="composer-effort"
-                  title="推理力度"
-                  onClick={() => setOpenMenu(openMenu === "effort" ? null : "effort")}
-                >
-                  <span className="composer-dot" aria-hidden />
-                  {effortText}
-                  <IconChevron size={10} />
-                </button>
-                {openMenu === "effort" && (
-                  <div className="composer-menu-pop" data-testid="composer-effort-menu" role="menu">
-                    {EFFORT_OPTIONS.map((opt) => (
-                      <button
-                        type="button"
-                        key={opt.id}
-                        role="menuitem"
-                        className={`composer-menu-item${opt.id === effortId ? " active" : ""}`}
-                        onClick={() => pickEffort(opt.id, opt.cmd)}
-                      >
-                        {opt.label}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-            {modeOpt && (
-              <div className="composer-menu">
-                <button
-                  type="button"
-                  className={`composer-chip tone-${modeOpt.tone}`}
-                  data-testid="composer-mode"
-                  title="/always-approve"
-                  onClick={() => setOpenMenu(openMenu === "mode" ? null : "mode")}
-                >
-                  <span className="composer-dot" aria-hidden />
-                  {modeOpt.label}
-                  <IconChevron size={10} />
-                </button>
-                {openMenu === "mode" && (
-                  <div className="composer-menu-pop" data-testid="composer-mode-menu" role="menu">
-                    {MODE_OPTIONS.map((opt) => (
-                      <button
-                        type="button"
-                        key={opt.id}
-                        role="menuitem"
-                        className={`composer-menu-item tone-${opt.tone}${opt.id === modeId ? " active" : ""}`}
-                        onClick={() => pickMode(opt.id, opt.cmd)}
-                      >
-                        <span>
-                          <span className="composer-dot" aria-hidden />
-                          {opt.label}
-                        </span>
-                        <span className="hint">{opt.hint}</span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-            {sessionBar.ctx && (
-              <span className="composer-ctx" data-testid="composer-ctx" title="上下文用量">
-                <span className="composer-ctx-bar" aria-hidden>
-                  <i style={{ width: sessionBar.ctx }} />
-                </span>
-                {sessionBar.ctx}
-              </span>
-            )}
-          </div>
           <span className="composer-spacer" />
           {agent && (
             <span className="composer-brand" data-testid="composer-brand">
               {agent.agent}
             </span>
-          )}
-          {working ? (
-            <button
-              type="button"
-              className="composer-send stop"
-              data-testid="composer-send"
-              title="中断（Ctrl+C）"
-              disabled={!paneId}
-              onClick={() => void interrupt(["ctrl+c"])}
-            >
-              <IconStop />
-            </button>
-          ) : (
-            <button
-              type="button"
-              className="composer-send"
-              data-testid="composer-send"
-              title={agent ? "发送" : "执行"}
-              onClick={() => void send()}
-              disabled={!canSend}
-            >
-              <IconPlay />
-            </button>
           )}
         </div>
       </div>

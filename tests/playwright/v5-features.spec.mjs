@@ -137,6 +137,17 @@ test.describe("F2 sidebar apps", () => {
     });
     expect(value, "cwd options should contain git-proj").toBeTruthy();
     await page.getByTestId("cwd-select").selectOption(value);
+    // NOTE(test-fix): the panel may still be rendering the PREVIOUS directory's
+    // status here — the project root is also on branch "main", so the branch
+    // assertion cannot distinguish stale from fresh, and the row list used to
+    // be read before the git-proj refetch landed (intermittent failure under
+    // load). Wait for the freshly fetched repo's own change row first; every
+    // assertion below is then guaranteed to see the switched directory.
+    await panel
+      .getByTestId("git-file")
+      .filter({ hasText: "src/index.js" })
+      .first()
+      .waitFor({ state: "visible", timeout: 15000 });
     await expect(panel.getByTestId("git-branch")).toContainText("main");
     const rows = panel.getByTestId("git-file");
     await expect(rows.first()).toBeVisible();

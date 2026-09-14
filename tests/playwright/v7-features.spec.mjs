@@ -329,6 +329,70 @@ test.describe("F5 composer toolbar", () => {
       { timeout: 8000 },
     );
   });
+
+  test("工具条分段几何：两两不相交且无横向溢出（评审 M2 防回归）", async () => {
+    await seedAgentV7();
+    const { page } = ctx;
+    await expect(page.getByTestId("composer-toolbar")).toBeVisible();
+    const geo = await page.evaluate(() => {
+      const core = document.querySelector(".composer-toolbar-core");
+      if (!core) return null;
+      const segs = Array.from(core.children).filter((el) => {
+        const s = getComputedStyle(el);
+        const r = el.getBoundingClientRect();
+        return s.display !== "none" && s.visibility !== "hidden" && r.width > 0;
+      });
+      const rects = segs.map((el) => {
+        const r = el.getBoundingClientRect();
+        return { cls: String(el.className), l: r.left, r: r.right, t: r.top, b: r.bottom };
+      });
+      const overlaps = [];
+      for (let i = 0; i < rects.length; i++) {
+        for (let j = i + 1; j < rects.length; j++) {
+          const a = rects[i];
+          const b = rects[j];
+          const ox = Math.min(a.r, b.r) - Math.max(a.l, b.l);
+          const oy = Math.min(a.b, b.b) - Math.max(a.t, b.t);
+          // shared hairline edges (ox == 0) are the design, not an overlap
+          if (ox > 1 && oy > 1) overlaps.push([a.cls, b.cls, Math.round(ox)]);
+        }
+      }
+      return {
+        count: rects.length,
+        overlaps,
+        scrollW: core.scrollWidth,
+        clientW: core.clientWidth,
+      };
+    });
+    expect(geo).not.toBeNull();
+    expect(geo.count).toBeGreaterThanOrEqual(8); // attach/plus/target/view/model/status-chips/status-ring/esc/send
+    expect(geo.overlaps, "segments overlapped: " + JSON.stringify(geo.overlaps)).toEqual([]);
+    expect(
+      geo.scrollW,
+      `toolbar overflows (${geo.scrollW} > ${geo.clientW}) — segments must fit without scrolling`,
+    ).toBeLessThanOrEqual(geo.clientW + 1);
+  });
+
+  test("target 下拉键盘可用（↑↓ 移动 / Enter 选择 / Escape 关闭）", async () => {
+    await seedAgentV7();
+    const { page, pane3 } = ctx;
+    await page.getByTestId("toolbar-target").click();
+    const menu = page.getByTestId("toolbar-menu");
+    await expect(menu).toBeVisible();
+    // ↓ moves the highlight to the second item (shell pane), Enter picks it
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(
+      (pid) => window.__herdr_store.getState().activePaneId === pid,
+      pane3.pane_id,
+      { timeout: 5000 },
+    );
+    // Escape closes the floating menu
+    await page.getByTestId("toolbar-view").click();
+    await expect(page.getByTestId("toolbar-menu")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("toolbar-menu")).toHaveCount(0);
+  });
 });
 
 test.describe("F6 thinking live", () => {
@@ -383,6 +447,13 @@ test.describe("F7 smoothness", () => {
   test("时钟组件隔离：pane 文本更新不重挂载时钟", async () => {
     await seedAgentV7();
     const { page, sock, pane2 } = ctx;
+    // NOTE(test-fix): wait for the thread (and its clock) to actually mount
+    // before grabbing the node. seedAgentV7 returns as soon as the agent is
+    // registered in the store — the first pane.read may still be in flight,
+    // so the grab used to store `undefined` and the identity check failed
+    // regardless of streaming behavior. The contract under test ("clock DOM
+    // node survives text streaming") is unchanged.
+    await page.waitForSelector(".turn-time", { state: "attached", timeout: 15000 });
     await page.evaluate(() => {
       const el = document.querySelector(".turn-time");
       if (el) (window).__v7clock = el;
