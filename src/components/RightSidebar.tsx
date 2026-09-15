@@ -166,14 +166,19 @@ export function RightSidebar() {
   const root = sidebarRoot ?? activeCwd;
 
   // Following the active pane wins over a stale manual choice — but only on
-  // an ACTUAL cwd change. The effect also runs on mount, and blindly
+  // an ACTUAL cwd change (non-null → different non-null). Transient nulls
+  // (partial snapshots / pane churn while the herdr session settles) and the
+  // boot-time null → cwd arrival must not wipe a manual pick the user already
+  // made: the wipe used to fire there, the panel fell back to the pane cwd and
+  // its upward repo detection rendered the PARENT repo's status over the
+  // selected one (v5 F2 flake). The effect also runs on mount, and blindly
   // resetting there would wipe the persisted manual choice every time the
   // sidebar is reopened (the store survives the unmount; that's the point).
   const prevCwdRef = useRef(activeCwd);
   useEffect(() => {
     if (prevCwdRef.current === activeCwd) return;
+    if (activeCwd !== null && prevCwdRef.current !== null) setSidebarRoot(null);
     prevCwdRef.current = activeCwd;
-    setSidebarRoot(null);
   }, [activeCwd, setSidebarRoot]);
 
   const [tree, setTree] = useState<FsNode[] | null>(null);

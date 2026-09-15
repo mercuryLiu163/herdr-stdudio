@@ -179,6 +179,18 @@ export function IconMosaic({ size = 14 }: { size?: number }) {
   );
 }
 
+/** V9 composer: ▦ grid glyph for the model / 命令 outline buttons. */
+export function IconGrid({ size = 14 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round">
+      <rect x="2" y="2" width="5" height="5" rx="1.2" />
+      <rect x="9" y="2" width="5" height="5" rx="1.2" />
+      <rect x="2" y="9" width="5" height="5" rx="1.2" />
+      <rect x="9" y="9" width="5" height="5" rx="1.2" />
+    </svg>
+  );
+}
+
 export function IconUserMsg({ size = 12 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">

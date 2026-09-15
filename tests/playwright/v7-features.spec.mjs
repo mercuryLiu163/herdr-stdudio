@@ -230,6 +230,11 @@ test.describe("F4 ZCODE 对话流（非 agent 的 shell 转写）", () => {
       const t = s.activePaneId ? s.outputs[s.activePaneId]?.text ?? "" : "";
       return t.includes("测试功能") || t.includes("没问题");
     }, null, { timeout: 10000 });
+    // NOTE(test-fix): 上面的 waitForFunction 轮询的是 store 文本，而「对话」视图
+    // 切换在其后的 React effect（AutoChatView）里落地——evaluate 偶发跑在切换
+    // 完成前（失败快照显示「原始输出」仍处于按下态），chat-thread 尚未挂载导致
+    // threadW=0。契约不变（铺满测量），只是先等对话视图真正挂载。
+    await page.getByTestId("chat-thread").waitFor({ state: "visible", timeout: 10000 });
     const { userW, asstW, threadW, asstText } = await page.evaluate(() => {
       const thread = document.querySelector("[data-testid='chat-thread']");
       const user = document.querySelector("[data-testid='msg-user']");

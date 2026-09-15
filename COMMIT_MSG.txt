@@ -1,0 +1,8 @@
+feat(v8): Composer 复刻参考截图（离散描边按钮组 + 激活 chip）
+
+用户对分段胶囊形态不满意，按新参考截图整体复刻：
+- 离散圆角描边按钮组取代 Double-Bezel 分段胶囊：⊕ 引用文件 / 📎 上传图片 / 模型∨（选即发 /model）/ ✦对话× 激活 chip（×切原始输出）/ ▦命令（slash palette 按钮形态）/ 状态徽标 / 发送⏎（working 切红描边■中断）
+- 模型下拉菜单三分组：模型预设 + 推理力度 + 权限模式（effort/mode 段并入菜单，V8 testid 零修改共存）
+- ghost 面板治理：关闭态全内容 inert + 组头命中面缩至 2×2（消除聊天区底部 204×25px 隐形热区与 Tab 可达的静默命令触发，评审运行态实证）；命令面板与模型面板互斥；Esc 幽灵 chip 仅 working 态渲染
+- 附带根修：v5 git 侧栏 flake 根因（sidebarRoot 在 cwd 瞬态 null 时被误清）
+测试：Playwright 79 passed / 4 skipped / 0 failed；V1 回归 ALL GREEN；typecheck 通过；judge 对参考图终审 verdict=same
