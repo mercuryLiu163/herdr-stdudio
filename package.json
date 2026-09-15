@@ -6,6 +6,7 @@
   "main": "dist-electron/main.js",
   "private": true,
   "scripts": {
+    "predev": "node scripts/kill-port.mjs",
     "dev": "concurrently -k \"npm:dev:renderer\" \"npm:dev:main\" \"npm:dev:electron\"",
     "dev:renderer": "vite",
     "dev:main": "esbuild electron/main.ts electron/preload.ts --bundle --platform=node --external:electron --outdir=dist-electron --format=cjs --watch --sourcemap",
