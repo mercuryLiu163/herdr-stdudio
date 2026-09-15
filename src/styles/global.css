@@ -2253,16 +2253,9 @@ body.mosaic-dragging .mosaic-cell-body {
   opacity: 0.4;
 }
 
-/* V8 status chips live inside the toolbar. M1 review: the group must NEVER be
-   squeezed by flex — an overflowing row scrolls (see .composer-toolbar-core),
-   it does not overlap. */
-.composer-status {
-  display: flex;
-  align-items: center;
-  gap: 1px;
-  flex-shrink: 0;
-  padding: 0 2px;
-}
+/* V8 status chips were folded into the F5 toolbar; composer-status is now the
+   ◐ ring segment (复审收敛). M1 review rule kept for the chips themselves:
+   they must NEVER be squeezed by flex — an overflowing row scrolls. */
 
 .composer-chip {
   display: inline-flex;
@@ -2306,8 +2299,6 @@ body.mosaic-dragging .mosaic-cell-body {
   background: var(--text-faint);
   flex-shrink: 0;
 }
-.composer-chip.tone-warn { color: var(--warn); }
-.composer-chip.tone-warn .composer-dot { background: var(--warn); }
 .composer-chip.tone-danger { color: var(--danger); }
 .composer-chip.tone-danger .composer-dot { background: var(--danger); }
 .composer-chip.tone-ok { color: var(--ok); }
@@ -2362,47 +2353,20 @@ body.mosaic-dragging .mosaic-cell-body {
 .composer-menu-item.tone-ok { color: var(--ok); }
 .composer-menu-item.tone-info { color: var(--info); }
 
-.composer-ctx {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  margin-left: 4px;
-  padding-left: 6px;
-  border-left: 1px solid var(--border);
-  font-size: 11.5px;
-  color: var(--text-faint);
-  font-variant-numeric: tabular-nums;
-}
-.composer-ctx-bar {
-  width: 28px;
-  height: 3px;
-  border-radius: 2px;
-  background: var(--wash-5);
-  overflow: hidden;
-  display: inline-block;
-}
-.composer-ctx-bar i {
-  display: block;
-  height: 100%;
-  background: var(--text-faint);
-  border-radius: 2px;
-}
-
 .composer-spacer {
   flex: 1;
   min-width: 8px;
 }
 
-.composer-brand {
-  font-size: 12px;
-  color: var(--text-dim);
+/* agent 徽标（复审收敛：从胶囊外移入胶囊内，右端紧贴发送钮；JS 截 10 字符） */
+.tb-brand {
+  font-size: 11.5px;
+  color: var(--text-faint);
   padding: 0 8px;
-  text-transform: lowercase;
   letter-spacing: 0.2px;
-  max-width: 90px;
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
+  flex-shrink: 0;
+  /* 评审残留项：徽标文字必须完整（max-width+ellipsis 曾把 e2e-fake agent 截成 e2e-fake-…） */
 }
 
 .composer-send {
@@ -2542,12 +2506,36 @@ body.mosaic-dragging .mosaic-cell-body {
   justify-content: center;
   padding: 0;
 }
-.tb-seg.tb-hint {
-  font-size: 11px;
+
+/* Esc 中断 ghost chip：悬浮于胶囊右上角（D6 契约），不占工具条段位；
+   仅 agent pane 渲染。 */
+.composer-esc-chip {
+  position: absolute;
+  top: -9px;
+  right: 18px;
+  z-index: 5;
+  height: 18px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: var(--surface-raised);
+  box-shadow: inset 0 0 0 1px var(--border);
   color: var(--text-faint);
+  font-size: 10.5px;
+  white-space: nowrap;
+  transition:
+    color 0.18s var(--ease-fluid),
+    transform 0.18s var(--ease-fluid),
+    opacity 0.18s var(--ease-fluid);
 }
-.tb-seg.tb-hint:hover:not(:disabled) {
-  color: var(--text-dim);
+.composer-esc-chip:hover:not(:disabled) {
+  color: var(--text);
+}
+.composer-esc-chip:active:not(:disabled) {
+  transform: scale(0.98);
+}
+.composer-esc-chip:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 .tb-spring {
@@ -2556,63 +2544,64 @@ body.mosaic-dragging .mosaic-cell-body {
   height: 1px;
 }
 
-/* V8 status chips now live inside the toolbar; keep them quiet */
-.composer-status {
-  display: flex;
-  align-items: center;
-  gap: 1px;
-  min-width: 0;
-  padding: 0 2px;
-}
+/* 复审收敛：原 V8 chips 段容器（.composer-status）不存在了 — 该 testid 现挂在
+   下面的 ◐ 环形段（.tb-status）上；effort/mode 菜单为工具条直接子段。 */
 
-/* 状态环段：working=CSS 转圈 / idle 绿 / blocked 琥珀 / done 蓝 + 状态词 */
+/* ◐ 环形段：SVG 进度环（弧长 = ctx%）+ 状态词。环色 = agent 状态：
+   working=accent 自旋 / blocked=琥珀 / idle+done=绿（复审：done 变绿）；
+   原「横条进度条 + 完成徽标」两段由这一枚承载。 */
 .tb-status {
   display: inline-flex;
   align-items: center;
   gap: 5px;
   height: 26px;
-  padding: 0 6px;
+  padding: 0 8px;
   flex-shrink: 0;
   min-width: 0;
 }
-.tb-ring {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  border: 2px solid var(--text-faint);
+.tb-orb {
+  display: block;
   flex-shrink: 0;
 }
-.tb-status.s-working .tb-ring {
-  border-color: var(--accent);
-  border-right-color: transparent;
-  animation: ring-spin 0.9s linear infinite;
-  will-change: transform;
+.tb-orb-track {
+  stroke: var(--wash-5);
 }
-.tb-status.s-blocked .tb-ring {
-  border-color: var(--warn);
-}
-.tb-status.s-done .tb-ring {
-  border-color: var(--info);
-}
-.tb-status.s-idle .tb-ring {
-  border-color: var(--ok);
+.tb-orb-arc {
+  stroke: var(--text-faint);
 }
 .tb-status-word {
   font-size: 11.5px;
   color: var(--text-faint);
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.tb-status.s-working .tb-orb {
+  animation: ring-spin 0.9s linear infinite;
+  will-change: transform;
+}
+.tb-status.s-working .tb-orb-arc {
+  stroke: var(--accent);
 }
 .tb-status.s-working .tb-status-word {
   color: var(--accent);
 }
-.tb-status.s-idle .tb-status-word {
-  color: var(--ok);
+.tb-status.s-blocked .tb-orb-arc {
+  stroke: var(--warn);
 }
 .tb-status.s-blocked .tb-status-word {
   color: var(--warn);
 }
+.tb-status.s-done .tb-orb-arc {
+  stroke: var(--ok);
+}
 .tb-status.s-done .tb-status-word {
-  color: var(--info);
+  color: var(--ok);
+}
+.tb-status.s-idle .tb-orb-arc {
+  stroke: var(--ok);
+}
+.tb-status.s-idle .tb-status-word {
+  color: var(--ok);
 }
 
 /* Button-in-Button 发送钮：主胶囊右端内嵌 28px 圆形 accent 钮；

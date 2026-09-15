@@ -246,8 +246,24 @@ async function main() {
   });
 
   await t.run("D6", "Esc 中断按钮 + toast", async () => {
+    // NOTE(test-fix): 复审收敛后「Esc 中断」从工具条胶囊行移出，改为悬浮在胶囊
+    // 右上角的 ghost chip，且仅在 agent pane 渲染。契约本身不变（点击 → 键码
+    // 发出 → toast 确认），因此先给当前 pane 注册一个一次性 fake agent 以满足
+    // 新的显示条件，断言后立即注销。
+    const activePane = await cdp.evaluate(`window.__herdr_store.getState().activePaneId`);
+    await api.paneReportAgent(sock, activePane, "e2e-fake", "working");
+    await cdp.waitFor(
+      "esc chip rendered for agent pane",
+      `(() => {
+        const s = window.__herdr_store.getState();
+        return !!s.agents.find((a) => a.pane_id === ${JSON.stringify(activePane)})
+          && !!document.querySelector("[data-testid='composer-esc']");
+      })()`,
+      8000,
+    );
     await cdp.evaluate(clickByText("button", "Esc 中断"));
     await cdp.waitFor("esc toast", `(() => { const ts = [...document.querySelectorAll('.toast')]; return ts.some((x) => x.textContent.includes('esc')); })()`, 5000);
+    await api.paneClearAgent(sock, activePane);
   });
 
   await t.run("D7", "Ctrl+C 按键 0x03 送达前台程序（raw-mode）", async () => {

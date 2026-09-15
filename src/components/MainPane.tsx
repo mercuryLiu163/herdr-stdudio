@@ -17,7 +17,7 @@ import type { PaneLayout, PaneLayoutEntry, PaneRect } from "../types";
 import { paneLayout, paneResize, agentPrompt, paneSendText, paneSendKeys, agentSendKeys, paneType } from "../api";
 import { slashCommandsFor, filterSlashCommands } from "../slash-commands";
 import { IconBook, IconClock, IconFile, IconPlay, IconPlus, IconStop, IconTerminal, IconUserMsg } from "./icons";
-import { IconChevron, IconColumns, IconMosaic, IconPaperclip } from "./icons";
+import { IconChevron, IconColumns, IconMosaic } from "./icons";
 
 const statusLabel: Record<string, string> = {
   working: "工作中",
@@ -227,7 +227,7 @@ export function MainPane() {
       ) : (
         <OutputReader onSwitchToChat={() => pickView("chat")} />
       )}
-      <Composer view={view} onView={pickView} />
+      <Composer />
     </div>
   );
 }
@@ -1434,14 +1434,16 @@ function readFileAsDataUrl(file: File): Promise<string> {
   });
 }
 
-type ToolbarMenuId = "tb-attach" | "tb-target" | "tb-view" | "tb-model";
+// 复审收敛（对标 mcode 参考模板）：工具条只保留「+ 附加」「模型 ∨」两类下拉段，
+// target/view 段已移除（目标=当前 pane 无切换语义；视图切换由头部分段承担）。
+type ToolbarMenuId = "tb-attach" | "tb-model";
 
 /** Narrow the shared popup state to the F5 toolbar menus. */
 function isTbMenu(m: null | "mode" | "effort" | ToolbarMenuId): m is ToolbarMenuId {
-  return m === "tb-attach" || m === "tb-target" || m === "tb-view" || m === "tb-model";
+  return m === "tb-attach" || m === "tb-model";
 }
 
-function Composer({ view, onView }: { view: ViewMode; onView: (v: ViewMode) => void }) {
+function Composer() {
   const layoutMode = useStore((s) => s.layoutMode);
   const paneId = useStore((s) => s.activePaneId);
   const panes = useStore((s) => s.panes);
@@ -1519,9 +1521,9 @@ function Composer({ view, onView }: { view: ViewMode; onView: (v: ViewMode) => v
     [text],
   );
 
-  // F5 input-target dropdown options (every mode — separate mode uses the
-  // toolbar-target segment, unified mode ALSO keeps the legacy select; both
-  // bind the same activePaneId field, so they stay in sync for free).
+  // F5 input-target dropdown options (every mode — the toolbar no longer has a
+  // target segment (复审收敛：分屏目标=当前 pane 无切换语义); unified mode keeps
+  // this legacy select bound to the same activePaneId field).
   const targetOptions = useMemo(() => {
     return panes
       .filter((p) => p.tab_id === activeTabId)
@@ -1619,8 +1621,19 @@ function Composer({ view, onView }: { view: ViewMode; onView: (v: ViewMode) => v
   const interrupt = async (keys: string[]) => {
     if (!paneId) return;
     try {
-      if (agent) await agentSendKeys(agent.pane_id, keys);
-      else await paneSendKeys(paneId, keys);
+      if (agent) {
+        try {
+          await agentSendKeys(agent.pane_id, keys);
+        } catch (err: any) {
+          // Authority-reported agents (and pre-registration agents) are not
+          // addressable via agent.send_keys — degrade to the pane channel
+          // (same fallback policy as deliver()).
+          if (!/not an active named agent/i.test(String(err?.message ?? err))) throw err;
+          await paneSendKeys(paneId, keys);
+        }
+      } else {
+        await paneSendKeys(paneId, keys);
+      }
       // Toast confirms the key actually went out (D6 contract: esc toast).
       pushToast("info", `已发送 ${keys.join(" ")}`);
       setTimeout(() => void refreshPane(paneId), 300);
@@ -1684,6 +1697,21 @@ function Composer({ view, onView }: { view: ViewMode; onView: (v: ViewMode) => v
   const agentStatus = agent?.agent_status;
   const working = agentStatus === "working" || agentStatus === "blocked";
   const statusWord = agent ? (STATUS_WORD[agentStatus ?? "unknown"] ?? agentStatus ?? "—") : "终端";
+  // 复审收敛：agent 徽标（显示名截 10 字符）与模型段（截 12 字符）都改为
+  // JS 截断 + title 全名，不再依赖 CSS ellipsis 的「硬裁」观感。
+  const brandName = agent ? agentDisplayName(agent) : "";
+  // 评审残留项：徽标省略号截断违反「每段文字完整」——仅超长名（>24 字符）才截断，
+  // 常规名（Claude Code / Codex / e2e-fake agent）完整显示。
+  const brandShort = brandName.length > 24 ? `${brandName.slice(0, 23)}…` : brandName;
+  const modelLabel = modelText.length > 12 ? `${modelText.slice(0, 11)}…` : modelText;
+  // ◐ 环形段：ctx 百分比驱动 SVG 弧长；无 ctx 时弧长退化为状态环（working 留
+  // 缺口好让旋转可见），颜色一律由 agent 状态 tone 决定（done=绿，复审改）。
+  const ctxPct = sessionBar.ctx ? Number.parseFloat(sessionBar.ctx) : Number.NaN;
+  const orbFrac = Number.isFinite(ctxPct)
+    ? Math.min(1, Math.max(0.02, ctxPct / 100))
+    : working
+      ? 0.75
+      : 1;
 
   // ---- m3 review: keyboard support for the shared toolbar menu ----
   // The open menu is flattened into data so ↑/↓/Enter act on the same list the
@@ -1693,7 +1721,7 @@ function Composer({ view, onView }: { view: ViewMode; onView: (v: ViewMode) => v
     key: string;
     label: string;
     hint?: string;
-    icon: "file" | "pane" | null;
+    icon: "file" | "plus" | null;
     mono?: boolean;
     title?: string;
     active: boolean;
@@ -1702,46 +1730,31 @@ function Composer({ view, onView }: { view: ViewMode; onView: (v: ViewMode) => v
   let tbItems: TbItem[] = [];
   if (isTbMenu(openMenu)) {
     if (openMenu === "tb-attach") {
-      tbItems = tbFiles.map((f) => ({
-        key: f.path,
-        label: f.name,
-        icon: "file" as const,
-        title: f.path,
-        active: false,
-        run: () => {
-          setOpenMenu(null);
-          insertAtCursor(atRef(f.name) + " ");
+      tbItems = [
+        // 复审收敛：+ 段同时承担图片上传（原独立 + 的行为，拖放/粘贴不受影响）
+        {
+          key: "__upload",
+          label: "上传图片…",
+          icon: "plus" as const,
+          title: "选择本地图片附件（也可拖放或粘贴到输入框）",
+          active: false,
+          run: () => {
+            setOpenMenu(null);
+            fileRef.current?.click();
+          },
         },
-      }));
-    } else if (openMenu === "tb-target") {
-      tbItems = targetOptions.map((o) => ({
-        key: o.paneId,
-        label: o.label,
-        icon: "pane" as const,
-        title: o.paneId,
-        active: o.paneId === paneId,
-        run: () => {
-          setOpenMenu(null);
-          selectPane(o.paneId);
-        },
-      }));
-    } else if (openMenu === "tb-view") {
-      tbItems = (
-        [
-          { id: "chat" as ViewMode, label: "对话", hint: "重排数据流" },
-          { id: "raw" as ViewMode, label: "原始输出", hint: "终端转写" },
-        ] as const
-      ).map((o) => ({
-        key: o.id,
-        label: o.label,
-        hint: o.hint,
-        icon: null,
-        active: view === o.id,
-        run: () => {
-          setOpenMenu(null);
-          onView(o.id);
-        },
-      }));
+        ...tbFiles.map((f) => ({
+          key: f.path,
+          label: f.name,
+          icon: "file" as const,
+          title: f.path,
+          active: false,
+          run: () => {
+            setOpenMenu(null);
+            insertAtCursor(atRef(f.name) + " ");
+          },
+        })),
+      ];
     } else {
       tbItems = presets.map((id) => ({
         key: id,
@@ -1973,64 +1986,40 @@ function Composer({ view, onView }: { view: ViewMode; onView: (v: ViewMode) => v
             }}
           />
           {/* F5 Double-Bezel 状态栏：外壳 wash 底 + 发丝 ring + 大圆角，内核独立底色 +
-              inset 高光 + 同心圆角；分段间发丝竖线。V8 的 composer status chips
-              合并为其中一个分段（NOTE: composer-status 等既有 testid 全部保留）。 */}
+              inset 高光 + 同心圆角；分段间发丝竖线。复审收敛（对标 mcode 参考模板）：
+              引用胶囊与 + 重复 → 删除（+ 承担 fs:tree 点选插 @路径 + 图片上传）；
+              target/view 段移除（目标=当前 pane 无切换语义，视图切换由头部分段承担）；
+              Esc 移出胶囊行，悬浮于胶囊右上角（仅 agent pane）。
+              NOTE: composer-status 等既有 testid 全部保留。 */}
           <div className="composer-toolbar" data-testid="composer-toolbar" ref={menuRef}>
-            <div className="composer-toolbar-core">
-              {/* 1) 引用文件：cwd 一级文件浅列表，点选插入 @相对路径 */}
+            {/* Esc 中断（D6 契约）：向前台程序发送 Esc，ghost chip 不占工具条段位。
+                仅 working 态显示——idle 期悬浮中断钮与「○ 空闲」自相矛盾（评审残留 2）。 */}
+            {agent && working && (
               <button
                 type="button"
-                className={`tb-seg${openMenu === "tb-attach" ? " on" : ""}`}
-                data-testid="toolbar-attach"
+                className="composer-esc-chip"
+                data-testid="composer-esc"
                 disabled={!paneId || status === "no-server"}
-                title="引用文件（插入 @相对路径）"
-                onClick={() => void openTbAttach()}
+                title="向前台程序发送 Esc"
+                onClick={() => void interrupt(["esc"])}
               >
-                <IconPaperclip size={13} />
-                <span className="tb-seg-label">引用</span>
+                Esc 中断
               </button>
-              {/* 2) 图片上传（V8 契约保留，并入工具条） */}
+            )}
+            <div className="composer-toolbar-core">
+              {/* 1) +：附加菜单（cwd 一级文件点选插入 @相对路径 / 上传图片） */}
               <button
                 type="button"
-                className="tb-seg tb-icon"
+                className={`tb-seg tb-icon${openMenu === "tb-attach" ? " on" : ""}`}
                 data-testid="composer-attach"
                 disabled={!paneId || status === "no-server"}
-                title="上传图片（也可拖放或粘贴）"
-                onClick={() => fileRef.current?.click()}
+                title="附加：引用文件（插入 @相对路径）或上传图片"
+                onClick={() => void openTbAttach()}
               >
                 <IconPlus size={13} />
               </button>
-              {/* 3) 目标 ∨：当前 tab 全部 pane（与 input-target 同字段双向同步） */}
-              {targetOptions.length > 0 && (
-                <button
-                  type="button"
-                  className={`tb-seg${openMenu === "tb-target" ? " on" : ""}`}
-                  data-testid="toolbar-target"
-                  disabled={!paneId || status === "no-server"}
-                  title="输入目标：发送到哪个窗格"
-                  onClick={() => setOpenMenu(openMenu === "tb-target" ? null : "tb-target")}
-                >
-                  <span className="tb-seg-label">
-                    {targetOptions.find((o) => o.paneId === paneId)?.label ?? "目标"}
-                  </span>
-                  <IconChevron size={9} />
-                </button>
-              )}
-              {/* 4) 视图 ∨：与既有 view 分段同字段（统一布局无对话/原始之分，不放假功能） */}
-              {layoutMode === "separate" && (
-                <button
-                  type="button"
-                  className={`tb-seg${openMenu === "tb-view" ? " on" : ""}`}
-                  data-testid="toolbar-view"
-                  title="视图：对话 / 原始输出"
-                  onClick={() => setOpenMenu(openMenu === "tb-view" ? null : "tb-view")}
-                >
-                  <span className="tb-seg-label">{view === "chat" ? "对话" : "原始"}</span>
-                  <IconChevron size={9} />
-                </button>
-              )}
-              {/* 5) 模型 ∨（仅 agent）：该 kind 模型预设，选择即发送 /model <名>。
-                 composer-model（V8）作为只读当前模型文案并入本段。 */}
+              {/* 2) 模型 ∨（仅 agent）：该 kind 模型预设，选择即发送 /model <名>。
+                 label 截 12 字符，title 给全名；原「会话/目标/视图」段已并入头部或移除。 */}
               {agent && modelText && (
                 <button
                   type="button"
@@ -2040,112 +2029,109 @@ function Composer({ view, onView }: { view: ViewMode; onView: (v: ViewMode) => v
                   onClick={() => setOpenMenu(openMenu === "tb-model" ? null : "tb-model")}
                 >
                   <span className="tb-seg-label" data-testid="composer-model">
-                    {modelText}
+                    {modelLabel}
                   </span>
                   <IconChevron size={9} />
                 </button>
               )}
-              {/* 6) V8 状态 chips（effort / mode / ctx）— composer-status 分段 */}
-              <div className="composer-status" data-testid="composer-status">
-                {effortText && (
-                  <div className="composer-menu">
-                    <button
-                      type="button"
-                      className={`composer-chip tone-${effortId === "high" || effortId === "xhigh" ? "warn" : effortId === "low" ? "dim" : "ok"}`}
-                      data-testid="composer-effort"
-                      title="推理力度"
-                      onClick={() => setOpenMenu(openMenu === "effort" ? null : "effort")}
-                    >
-                      <span className="composer-dot" aria-hidden />
-                      <span className="chip-label">{effortText}</span>
-                      <IconChevron size={9} />
-                    </button>
-                    {openMenu === "effort" && (
-                      <div className="composer-menu-pop" data-testid="composer-effort-menu" role="menu">
-                        {EFFORT_OPTIONS.map((opt) => (
-                          <button
-                            type="button"
-                            key={opt.id}
-                            role="menuitem"
-                            className={`composer-menu-item${opt.id === effortId ? " active" : ""}`}
-                            onClick={() => pickEffort(opt.id, opt.cmd)}
-                          >
+              {/* 3) effort ∨：中性灰白（复审：去橙色强调） */}
+              {effortText && (
+                <div className="composer-menu">
+                  <button
+                    type="button"
+                    className="composer-chip"
+                    data-testid="composer-effort"
+                    title="推理力度"
+                    onClick={() => setOpenMenu(openMenu === "effort" ? null : "effort")}
+                  >
+                    <span className="chip-label">{effortText}</span>
+                    <IconChevron size={9} />
+                  </button>
+                  {openMenu === "effort" && (
+                    <div className="composer-menu-pop" data-testid="composer-effort-menu" role="menu">
+                      {EFFORT_OPTIONS.map((opt) => (
+                        <button
+                          type="button"
+                          key={opt.id}
+                          role="menuitem"
+                          className={`composer-menu-item${opt.id === effortId ? " active" : ""}`}
+                          onClick={() => pickEffort(opt.id, opt.cmd)}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+              {/* 4) mode ∨：红色强调保留（Bypass） */}
+              {modeOpt && (
+                <div className="composer-menu">
+                  <button
+                    type="button"
+                    className={`composer-chip tone-${modeOpt.tone}`}
+                    data-testid="composer-mode"
+                    title="/always-approve"
+                    onClick={() => setOpenMenu(openMenu === "mode" ? null : "mode")}
+                  >
+                    <span className="composer-dot" aria-hidden />
+                    <span className="chip-label">{modeOpt.label}</span>
+                    <IconChevron size={9} />
+                  </button>
+                  {openMenu === "mode" && (
+                    <div className="composer-menu-pop" data-testid="composer-mode-menu" role="menu">
+                      {MODE_OPTIONS.map((opt) => (
+                        <button
+                          type="button"
+                          key={opt.id}
+                          role="menuitem"
+                          className={`composer-menu-item tone-${opt.tone}${opt.id === modeId ? " active" : ""}`}
+                          onClick={() => pickMode(opt.id, opt.cmd)}
+                        >
+                          <span>
+                            <span className="composer-dot" aria-hidden />
                             {opt.label}
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
-                {modeOpt && (
-                  <div className="composer-menu">
-                    <button
-                      type="button"
-                      className={`composer-chip tone-${modeOpt.tone}`}
-                      data-testid="composer-mode"
-                      title="/always-approve"
-                      onClick={() => setOpenMenu(openMenu === "mode" ? null : "mode")}
-                    >
-                      <span className="composer-dot" aria-hidden />
-                      <span className="chip-label">{modeOpt.label}</span>
-                      <IconChevron size={9} />
-                    </button>
-                    {openMenu === "mode" && (
-                      <div className="composer-menu-pop" data-testid="composer-mode-menu" role="menu">
-                        {MODE_OPTIONS.map((opt) => (
-                          <button
-                            type="button"
-                            key={opt.id}
-                            role="menuitem"
-                            className={`composer-menu-item tone-${opt.tone}${opt.id === modeId ? " active" : ""}`}
-                            onClick={() => pickMode(opt.id, opt.cmd)}
-                          >
-                            <span>
-                              <span className="composer-dot" aria-hidden />
-                              {opt.label}
-                            </span>
-                            <span className="hint">{opt.hint}</span>
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
-                {sessionBar.ctx && (
-                  <span className="composer-ctx" data-testid="composer-ctx" title="上下文用量">
-                    <span className="composer-ctx-bar" aria-hidden>
-                      <i style={{ width: sessionBar.ctx }} />
-                    </span>
-                    {sessionBar.ctx}
-                  </span>
-                )}
-              </div>
-              <span className="tb-spring" aria-hidden />
-              {/* 7) 状态环：working=CSS 转圈 / idle 绿 / blocked 琥珀 / done 蓝 */}
+                          </span>
+                          <span className="hint">{opt.hint}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+              {/* 5) ◐ 环形段：原「横条进度 + 完成徽标」合并为一枚 SVG 环 —
+                 弧长 = ctx 百分比，环色 = agent 状态（working 转 / blocked 琥珀 /
+                 idle+done 绿，复审改 done 绿）；无 ctx 时退化为纯状态环 + 状态词。 */}
               <div
                 className={`tb-status s-${agentStatus ?? "shell"}`}
-                data-testid="toolbar-status"
-                title={agent ? (statusLabel[agentStatus ?? ""] ?? agentStatus ?? "") : "普通终端"}
+                data-testid="composer-status"
+                title={`${statusWord}${sessionBar.ctx ? ` · 上下文 ${sessionBar.ctx}` : ""}`}
               >
-                {working ? (
-                  <span className="tb-ring spin" aria-hidden />
-                ) : (
-                  <span className="tb-ring" aria-hidden />
-                )}
-                <span className="tb-status-word">{statusWord}</span>
+                <svg className="tb-orb" viewBox="0 0 16 16" width={14} height={14} aria-hidden>
+                  <circle className="tb-orb-track" cx="8" cy="8" r="6.5" fill="none" strokeWidth="2" />
+                  <circle
+                    className="tb-orb-arc"
+                    cx="8"
+                    cy="8"
+                    r="6.5"
+                    fill="none"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeDasharray={`${(orbFrac * 2 * Math.PI * 6.5).toFixed(3)} ${(2 * Math.PI * 6.5).toFixed(3)}`}
+                    transform="rotate(-90 8 8)"
+                  />
+                </svg>
+                <span className="tb-status-word">{Number.isFinite(ctxPct) ? sessionBar.ctx : statusWord}</span>
               </div>
-              {/* Esc 中断（D6 契约）：向前台程序发送 Esc */}
-              <button
-                type="button"
-                className="tb-seg tb-hint"
-                data-testid="composer-esc"
-                disabled={!paneId || status === "no-server"}
-                title="向前台程序发送 Esc"
-                onClick={() => void interrupt(["esc"])}
-              >
-                Esc 中断
-              </button>
-              {/* 8) Button-in-Button 发送钮：主胶囊右端内嵌 28px 圆形 accent 钮 */}
+              <span className="tb-spring" aria-hidden />
+              {/* 6) agent 徽标：显示名截 10 字符 + title 全名（原胶囊外 brand 归位） */}
+              {agent && (
+                <span className="tb-brand" data-testid="composer-brand" title={`${brandName} · ${agent.agent}`}>
+                  {brandShort}
+                </span>
+              )}
+              {/* 7) Button-in-Button 发送钮：主胶囊右端内嵌 28px 圆形 accent 钮，
+                 flex-shrink:0 保证任何宽度下都完整可见 */}
               <button
                 type="button"
                 className={`send-bib${working ? " stop" : ""}`}
@@ -2181,7 +2167,7 @@ function Composer({ view, onView }: { view: ViewMode; onView: (v: ViewMode) => v
                     onClick={item.run}
                   >
                     {item.icon === "file" && <IconFile size={12} />}
-                    {item.icon === "pane" && <IconTerminal size={12} />}
+                    {item.icon === "plus" && <IconPlus size={12} />}
                     <span className="tb-menu-name">{item.label}</span>
                     {item.hint && <span className="tb-menu-hint">{item.hint}</span>}
                   </button>
@@ -2206,11 +2192,6 @@ function Composer({ view, onView }: { view: ViewMode; onView: (v: ViewMode) => v
             </select>
           )}
           <span className="composer-spacer" />
-          {agent && (
-            <span className="composer-brand" data-testid="composer-brand">
-              {agent.agent}
-            </span>
-          )}
         </div>
       </div>
     </div>

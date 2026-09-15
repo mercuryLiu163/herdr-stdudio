@@ -252,64 +252,70 @@ test.describe("F4 ZCODE 对话流（非 agent 的 shell 转写）", () => {
 
 
 // ---------- F5 Composer 状态栏 ----------
-async function seedAgentV7() {
+// NOTE(test-fix): 复审收敛（对标 mcode 参考模板）后工具条分段为
+// `+ / 模型 ∨ / effort ∨ / Bypass ∨ / ◐ 环形 / agent 徽标 / 发送钮`，
+// 旧 toolbar-attach / toolbar-target / toolbar-view 段已移除（见下方 NOTE）。
+async function seedAgentV7(agentKind = "e2e-fake") {
   const { sock, pane2 } = ctx;
   await api.paneSendInput(
     sock,
     pane2.pane_id,
     'echo "\u276f \u5f00\u59cb\u4efb\u52a1"; echo "Thought for 2s (ctrl+o to expand)"; echo "\u23fa Edit(src/index.js)"; echo "\u5b8c\u6210\u3002"',
   );
-  await api.paneReportAgent(sock, pane2.pane_id, "e2e-fake", "working");
+  await api.paneReportAgent(sock, pane2.pane_id, agentKind, "working");
   const { page } = ctx;
   await page.waitForFunction(
     (pid) => window.__herdr_store.getState().agents.some((a) => a.pane_id === pid),
     pane2.pane_id,
     { timeout: 10000 },
   );
-  await page.locator(".pane-chip").filter({ hasText: /e2e-fake agent|E2E/ }).first().click().catch(() => {});
+  // NOTE(test-fix): chip 文案随 agentKind 变（displayName 回退为 "<kind> agent"）
+  await page
+    .locator(".pane-chip")
+    .filter({ hasText: new RegExp(`${agentKind} agent|E2E`) })
+    .first()
+    .click()
+    .catch(() => {});
 }
 
 test.describe("F5 composer toolbar", () => {
-  test("分段齐全（Double-Bezel 工具条）", async () => {
-    await seedAgentV7();
+  test("分段收敛：+/模型/effort/Bypass/环形/agent徽标/发送 齐全，旧段移除", async () => {
+    // grok 系 agent 让 effort 段以默认值渲染（grokLike → medium）
+    await seedAgentV7("e2e-fake-grok");
     const { page } = ctx;
     await expect(page.getByTestId("composer-toolbar")).toBeVisible();
-    for (const id of ["toolbar-attach", "toolbar-target", "toolbar-view", "toolbar-model", "toolbar-status", "send-button"]) {
+    for (const id of [
+      "composer-attach",
+      "toolbar-model",
+      "composer-effort",
+      "composer-mode",
+      "composer-status",
+      "composer-brand",
+      "send-button",
+    ]) {
       await expect(page.getByTestId(id)).toBeVisible();
+    }
+    // NOTE(test-fix): 复审收敛删除了引用胶囊（与 + 重复）、target 段（分屏目标
+    // =当前 pane 无切换语义；统一模式 input-target 保留）、view 段（视图切换由
+    // 头部分段控件承担，工具条不重复）。
+    for (const gone of ["toolbar-attach", "toolbar-target", "toolbar-view"]) {
+      await expect(page.getByTestId(gone)).toHaveCount(0);
     }
   });
 
-  test("target 下拉切换输入目标", async () => {
-    await seedAgentV7();
-    const { page, pane3 } = ctx;
-    await page.getByTestId("toolbar-target").click();
-    const menu = page.getByTestId("toolbar-menu");
-    await expect(menu).toBeVisible();
-    await menu.locator("[data-testid='toolbar-menu-item']").filter({ hasText: /shell/ }).first().click();
-    await page.waitForFunction(
-      (pid) => window.__herdr_store.getState().activePaneId === pid,
-      pane3.pane_id,
-      { timeout: 5000 },
-    );
-  });
+  // NOTE(test-fix): 原「target 下拉切换输入目标」用例随 toolbar-target 段移除
+  // 而删除——分屏模式目标恒为当前 pane，无切换语义；统一模式的 input-target
+  // 下拉行为由既有 v8 契约覆盖。切换 pane 仍可点 pane-chip（v7 F1 流程已覆盖）。
 
-  test("view 下拉切换对话/原始", async () => {
-    await seedAgentV7();
-    const { page } = ctx;
-    await page.getByTestId("toolbar-view").click();
-    const menu = page.getByTestId("toolbar-menu");
-    await expect(menu).toBeVisible();
-    await menu.locator("[data-testid='toolbar-menu-item']").filter({ hasText: /原始/ }).click();
-    await expect(page.locator(".reader-card .ansi")).toBeVisible();
-    await page.getByTestId("toolbar-view").click();
-    await page.getByTestId("toolbar-menu").locator("[data-testid='toolbar-menu-item']").filter({ hasText: /对话/ }).click();
-    await expect(page.getByTestId("chat-immersive")).toBeVisible();
-  });
+  // NOTE(test-fix): 原「view 下拉切换对话/原始」用例随 toolbar-view 段移除而
+  // 删除——视图切换由头部 view-chat/view-raw 分段控件承担（本文件 F4 已覆盖：
+  // "ZCODE shell 自动打开对话视图" 断言其 aria-pressed），工具条对标参考模板
+  // 不再重复该控件。
 
   test("attach 插入 @路径；model 下拉发送 /model", async () => {
     await seedAgentV7();
     const { page, pane2 } = ctx;
-    await page.getByTestId("toolbar-attach").click();
+    await page.getByTestId("composer-attach").click();
     const menu = page.getByTestId("toolbar-menu");
     await expect(menu).toBeVisible();
     await menu.locator("[data-testid='toolbar-menu-item']").filter({ hasText: /sample\.md/ }).first().click();
@@ -330,8 +336,8 @@ test.describe("F5 composer toolbar", () => {
     );
   });
 
-  test("工具条分段几何：两两不相交且无横向溢出（评审 M2 防回归）", async () => {
-    await seedAgentV7();
+  test("工具条分段几何：两两不相交、无横向溢出、发送钮完整可见（评审防回归）", async () => {
+    await seedAgentV7("e2e-fake-grok");
     const { page } = ctx;
     await expect(page.getByTestId("composer-toolbar")).toBeVisible();
     const geo = await page.evaluate(() => {
@@ -357,38 +363,56 @@ test.describe("F5 composer toolbar", () => {
           if (ox > 1 && oy > 1) overlaps.push([a.cls, b.cls, Math.round(ox)]);
         }
       }
+      const send = document.querySelector("[data-testid='send-button']")?.getBoundingClientRect();
+      const coreRect = core.getBoundingClientRect();
       return {
         count: rects.length,
         overlaps,
         scrollW: core.scrollWidth,
         clientW: core.clientWidth,
+        send: send ? { l: send.left, r: send.right, w: send.width } : null,
+        coreL: coreRect.left,
+        coreR: coreRect.right,
       };
     });
     expect(geo).not.toBeNull();
-    expect(geo.count).toBeGreaterThanOrEqual(8); // attach/plus/target/view/model/status-chips/status-ring/esc/send
+    expect(geo.count).toBeGreaterThanOrEqual(6); // +/模型/effort/Bypass/环形/spring/徽标/发送
     expect(geo.overlaps, "segments overlapped: " + JSON.stringify(geo.overlaps)).toEqual([]);
     expect(
       geo.scrollW,
       `toolbar overflows (${geo.scrollW} > ${geo.clientW}) — segments must fit without scrolling`,
     ).toBeLessThanOrEqual(geo.clientW + 1);
+    // 发送钮必须完整落在胶囊内核右端（复审硬性要求：任何宽度不被挤出视野）
+    expect(geo.send.w).toBeGreaterThan(0);
+    expect(geo.send.r, "send button must end inside the toolbar core").toBeLessThanOrEqual(geo.coreR + 1);
+    expect(geo.send.l).toBeGreaterThanOrEqual(geo.coreL - 1);
   });
 
-  test("target 下拉键盘可用（↑↓ 移动 / Enter 选择 / Escape 关闭）", async () => {
-    await seedAgentV7();
-    const { page, pane3 } = ctx;
-    await page.getByTestId("toolbar-target").click();
+  test("model 下拉键盘可用（↑↓ 移动 / Enter 选择 / Escape 关闭）", async () => {
+    // NOTE(test-fix): 原「target 下拉键盘可用」用例随 target 段移除而重定向到
+    // 仍然存在的共享 tb 菜单（model 下拉）；键盘契约（↑↓/Enter/Escape）不变。
+    await seedAgentV7("e2e-fake-grok"); // grok 预设 3 项，↑↓ 才有移动空间
+    const { page, pane2 } = ctx;
+    await page.getByTestId("toolbar-model").click();
     const menu = page.getByTestId("toolbar-menu");
     await expect(menu).toBeVisible();
-    // ↓ moves the highlight to the second item (shell pane), Enter picks it
+    // ↓ moves the highlight to the second preset, Enter picks it → /model <id>
+    const second = menu.locator("[data-testid='toolbar-menu-item']").nth(1);
+    const text = await second.textContent();
+    const modelName = (text.match(/([\w.\-]+)$/) || [])[1] || "x";
     await page.keyboard.press("ArrowDown");
     await page.keyboard.press("Enter");
     await page.waitForFunction(
-      (pid) => window.__herdr_store.getState().activePaneId === pid,
-      pane3.pane_id,
-      { timeout: 5000 },
+      ([pid, m]) => {
+        const s = window.__herdr_store.getState();
+        const o = s.outputs[pid];
+        return !!(o && o.text.includes(m));
+      },
+      [pane2.pane_id, modelName],
+      { timeout: 8000 },
     );
     // Escape closes the floating menu
-    await page.getByTestId("toolbar-view").click();
+    await page.getByTestId("toolbar-model").click();
     await expect(page.getByTestId("toolbar-menu")).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(page.getByTestId("toolbar-menu")).toHaveCount(0);
