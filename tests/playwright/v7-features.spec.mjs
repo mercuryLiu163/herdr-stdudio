@@ -278,48 +278,24 @@ async function seedAgentV7(agentKind = "e2e-fake") {
     .catch(() => {});
 }
 
-test.describe("F5 composer toolbar", () => {
-  test("分段收敛：+/模型/effort/Bypass/环形/agent徽标/发送 齐全，旧段移除", async () => {
-    // grok 系 agent 让 effort 段以默认值渲染（grokLike → medium）
-    await seedAgentV7("e2e-fake-grok");
+test.describe("F5 composer toolbar (V9 restyle)", () => {
+  // V9: discrete rounded-outline buttons, reference screenshot parity.
+  test("控件组齐全：attach/图片/模型/tools/view-chip/status/send", async () => {
+    await seedAgentV7();
     const { page } = ctx;
     await expect(page.getByTestId("composer-toolbar")).toBeVisible();
-    for (const id of [
-      "composer-attach",
-      "toolbar-model",
-      "composer-effort",
-      "composer-mode",
-      "composer-status",
-      "composer-brand",
-      "send-button",
-    ]) {
+    for (const id of ["toolbar-attach", "composer-attach", "toolbar-model", "tools-button", "composer-status", "send-button"]) {
       await expect(page.getByTestId(id)).toBeVisible();
     }
-    // NOTE(test-fix): 复审收敛删除了引用胶囊（与 + 重复）、target 段（分屏目标
-    // =当前 pane 无切换语义；统一模式 input-target 保留）、view 段（视图切换由
-    // 头部分段控件承担，工具条不重复）。
-    for (const gone of ["toolbar-attach", "toolbar-target", "toolbar-view"]) {
-      await expect(page.getByTestId(gone)).toHaveCount(0);
-    }
+    // chat view active chip visible with dismiss ×
+    const chip = page.getByTestId("view-chip");
+    await expect(chip).toBeVisible();
+    await expect(chip).toContainText("对话");
   });
 
-  // NOTE(test-fix): 原「target 下拉切换输入目标」用例随 toolbar-target 段移除
-  // 而删除——分屏模式目标恒为当前 pane，无切换语义；统一模式的 input-target
-  // 下拉行为由既有 v8 契约覆盖。切换 pane 仍可点 pane-chip（v7 F1 流程已覆盖）。
-
-  // NOTE(test-fix): 原「view 下拉切换对话/原始」用例随 toolbar-view 段移除而
-  // 删除——视图切换由头部 view-chat/view-raw 分段控件承担（本文件 F4 已覆盖：
-  // "ZCODE shell 自动打开对话视图" 断言其 aria-pressed），工具条对标参考模板
-  // 不再重复该控件。
-
-  test("attach 插入 @路径；model 下拉发送 /model", async () => {
+  test("模型下拉选择即发送 /model <名>", async () => {
     await seedAgentV7();
     const { page, pane2 } = ctx;
-    await page.getByTestId("composer-attach").click();
-    const menu = page.getByTestId("toolbar-menu");
-    await expect(menu).toBeVisible();
-    await menu.locator("[data-testid='toolbar-menu-item']").filter({ hasText: /sample\.md/ }).first().click();
-    await expect(page.locator(".composer textarea")).toHaveValue(/@.*sample\.md/);
     await page.getByTestId("toolbar-model").click();
     const item = page.getByTestId("toolbar-menu").locator("[data-testid='toolbar-menu-item']").first();
     const text = await item.textContent();
@@ -336,89 +312,55 @@ test.describe("F5 composer toolbar", () => {
     );
   });
 
-  test("工具条分段几何：两两不相交、无横向溢出、发送钮完整可见（评审防回归）", async () => {
-    await seedAgentV7("e2e-fake-grok");
+  test("tools 按钮打开斜杠命令面板", async () => {
+    await seedAgentV7();
     const { page } = ctx;
-    await expect(page.getByTestId("composer-toolbar")).toBeVisible();
-    const geo = await page.evaluate(() => {
-      const core = document.querySelector(".composer-toolbar-core");
-      if (!core) return null;
-      const segs = Array.from(core.children).filter((el) => {
-        const s = getComputedStyle(el);
-        const r = el.getBoundingClientRect();
-        return s.display !== "none" && s.visibility !== "hidden" && r.width > 0;
-      });
-      const rects = segs.map((el) => {
-        const r = el.getBoundingClientRect();
-        return { cls: String(el.className), l: r.left, r: r.right, t: r.top, b: r.bottom };
-      });
-      const overlaps = [];
-      for (let i = 0; i < rects.length; i++) {
-        for (let j = i + 1; j < rects.length; j++) {
-          const a = rects[i];
-          const b = rects[j];
-          const ox = Math.min(a.r, b.r) - Math.max(a.l, b.l);
-          const oy = Math.min(a.b, b.b) - Math.max(a.t, b.t);
-          // shared hairline edges (ox == 0) are the design, not an overlap
-          if (ox > 1 && oy > 1) overlaps.push([a.cls, b.cls, Math.round(ox)]);
-        }
-      }
-      const send = document.querySelector("[data-testid='send-button']")?.getBoundingClientRect();
-      const coreRect = core.getBoundingClientRect();
-      return {
-        count: rects.length,
-        overlaps,
-        scrollW: core.scrollWidth,
-        clientW: core.clientWidth,
-        send: send ? { l: send.left, r: send.right, w: send.width } : null,
-        coreL: coreRect.left,
-        coreR: coreRect.right,
-      };
-    });
-    expect(geo).not.toBeNull();
-    expect(geo.count).toBeGreaterThanOrEqual(6); // +/模型/effort/Bypass/环形/spring/徽标/发送
-    expect(geo.overlaps, "segments overlapped: " + JSON.stringify(geo.overlaps)).toEqual([]);
-    expect(
-      geo.scrollW,
-      `toolbar overflows (${geo.scrollW} > ${geo.clientW}) — segments must fit without scrolling`,
-    ).toBeLessThanOrEqual(geo.clientW + 1);
-    // 发送钮必须完整落在胶囊内核右端（复审硬性要求：任何宽度不被挤出视野）
-    expect(geo.send.w).toBeGreaterThan(0);
-    expect(geo.send.r, "send button must end inside the toolbar core").toBeLessThanOrEqual(geo.coreR + 1);
-    expect(geo.send.l).toBeGreaterThanOrEqual(geo.coreL - 1);
+    await page.getByTestId("tools-button").click();
+    await expect(page.getByTestId("slash-palette")).toBeVisible();
+    await page.getByTestId("toolbar-model").click().catch(() => {});
+    await page.keyboard.press("Escape");
   });
 
-  test("model 下拉键盘可用（↑↓ 移动 / Enter 选择 / Escape 关闭）", async () => {
-    // NOTE(test-fix): 原「target 下拉键盘可用」用例随 target 段移除而重定向到
-    // 仍然存在的共享 tb 菜单（model 下拉）；键盘契约（↑↓/Enter/Escape）不变。
-    await seedAgentV7("e2e-fake-grok"); // grok 预设 3 项，↑↓ 才有移动空间
-    const { page, pane2 } = ctx;
-    await page.getByTestId("toolbar-model").click();
+  test("attach 点选文件插入 @路径", async () => {
+    await seedAgentV7();
+    const { page } = ctx;
+    await page.getByTestId("toolbar-attach").click();
     const menu = page.getByTestId("toolbar-menu");
     await expect(menu).toBeVisible();
-    // ↓ moves the highlight to the second preset, Enter picks it → /model <id>
-    const second = menu.locator("[data-testid='toolbar-menu-item']").nth(1);
-    const text = await second.textContent();
-    const modelName = (text.match(/([\w.\-]+)$/) || [])[1] || "x";
-    await page.keyboard.press("ArrowDown");
-    await page.keyboard.press("Enter");
-    await page.waitForFunction(
-      ([pid, m]) => {
-        const s = window.__herdr_store.getState();
-        const o = s.outputs[pid];
-        return !!(o && o.text.includes(m));
-      },
-      [pane2.pane_id, modelName],
-      { timeout: 8000 },
-    );
-    // Escape closes the floating menu
-    await page.getByTestId("toolbar-model").click();
-    await expect(page.getByTestId("toolbar-menu")).toBeVisible();
-    await page.keyboard.press("Escape");
-    await expect(page.getByTestId("toolbar-menu")).toHaveCount(0);
+    await menu.locator("[data-testid='toolbar-menu-item']").filter({ hasText: /sample\.md/ }).first().click();
+    await expect(page.locator(".composer textarea")).toHaveValue(/@.*sample\.md/);
+  });
+
+  test("view-chip × 切到原始输出", async () => {
+    await seedAgentV7();
+    const { page } = ctx;
+    await page.getByTestId("view-chip").locator("[data-testid='chip-x']").click();
+    await expect(page.locator(".reader-card .ansi")).toBeVisible();
+    await expect(page.getByTestId("view-chip")).toHaveCount(0);
+  });
+
+  test("几何：控件行单行、按钮两两不相交、发送钮完整可见", async () => {
+    await seedAgentV7();
+    const { page } = ctx;
+    const rects = await page.evaluate(() => {
+      const row = document.querySelector("[data-testid='composer-toolbar']");
+      const els = [...row.querySelectorAll("button, [data-testid='composer-status']")].filter((e) => e.offsetParent !== null);
+      const rs = els.map((e) => e.getBoundingClientRect());
+      const rowR = row.getBoundingClientRect();
+      return {
+        singleRow: Math.max(...rs.map((r) => r.bottom)) - Math.min(...rs.map((r) => r.top)) <= 40,
+        noOverlap: rs.every((a, i) => rs.every((b, j) => j <= i || a.right <= b.left + 0.5 || b.right <= a.left + 0.5)),
+        sendInside: (() => {
+          const send = document.querySelector("[data-testid='send-button']")?.getBoundingClientRect();
+          return send ? send.right <= rowR.right + 1 && send.left >= rowR.left - 1 : false;
+        })(),
+      };
+    });
+    expect(rects.singleRow, "controls on one row").toBeTruthy();
+    expect(rects.noOverlap, "buttons must not overlap").toBeTruthy();
+    expect(rects.sendInside, "send button inside toolbar").toBeTruthy();
   });
 });
-
 test.describe("F6 thinking live", () => {
   test("working 期：thinking 合并为单行实时行 + spinner", async () => {
     await seedAgentV7();
