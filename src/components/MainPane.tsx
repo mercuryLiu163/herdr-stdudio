@@ -16,7 +16,7 @@ import { renderMarkdown, highlightCode } from "../markdown";
 import type { PaneLayout, PaneLayoutEntry, PaneRect } from "../types";
 import { paneLayout, paneResize, agentPrompt, paneSendText, paneSendKeys, agentSendKeys, paneType } from "../api";
 import { slashCommandsFor, filterSlashCommands } from "../slash-commands";
-import { IconBook, IconClock, IconFile, IconGrid, IconPaperclip, IconPlus, IconStop, IconTerminal, IconUserMsg } from "./icons";
+import { IconBook, IconClock, IconFile, IconGrid, IconPaperclip, IconPlus, IconSend, IconStop, IconTerminal, IconUserMsg } from "./icons";
 import { IconChevron, IconColumns, IconMosaic } from "./icons";
 
 const statusLabel: Record<string, string> = {
@@ -528,7 +528,6 @@ function ChatThread({
           turn={turn}
           cwd={cwd}
           cwds={cwds}
-          agent={agent}
           updatedAt={updatedAt}
           working={working && ti === turns.length - 1}
           collapsed={collapsed.has(ti)}
@@ -591,17 +590,18 @@ function ThinkingLive({ blocks }: { blocks: Block[] }) {
 }
 
 /**
- * One conversation turn (V5 F1): the user prompt, then a header bar with the
- * agent avatar + display name + last-updated clock + derived stat chips
- * (steps / files / duration — only when derivable), then the agent's blocks,
- * then the per-turn modified-files card. The chevron collapses the whole
- * agent-produced section down to the header.
+ * One conversation turn (V9 F1): the user prompt, then a centered divider
+ * pill on a 1px hairline — `› HH:MM:SS · 时长` (mcode 主数据流 reference) —
+ * then the agent's blocks, then the per-turn modified-files card. The `›`
+ * chevron collapses the whole agent-produced section down to the pill.
+ * Avatar / agent name / step+file chips are gone (V9 F1: the reference pill
+ * carries only time + duration); the `.turn-time` class stays for the V7
+ * clock-isolation contract.
  */
 function ChatTurn({
   turn,
   cwd,
   cwds,
-  agent,
   updatedAt,
   working,
   collapsed,
@@ -610,17 +610,17 @@ function ChatTurn({
   turn: Turn;
   cwd: string | null;
   cwds: string[];
-  agent: ReturnType<typeof agentForPane>;
   updatedAt: number;
   working: boolean;
   collapsed: boolean;
   onToggle: () => void;
 }) {
   const stats = useMemo(() => turnStats(turn), [turn]);
-  const kind = agent?.agent || "agent";
-  const name = agent ? agentDisplayName(agent) || kind : "agent";
-  const initial = (kind[0] ?? "A").toUpperCase();
   const hasBody = turn.body.length > 0 || stats.files.length > 0;
+  // V9 review: turn meta (Worked for/Baked for) lives in the divider
+  // pill now — drop the body row to avoid double display; the pill keeps
+  // a locator-visible .sr-only copy so the V4 chat-meta contract holds.
+  const metaText = turn.body.find((b) => b.type === "meta")?.text ?? "";
   // F6: while the agent is working, thinking blocks of the ONGOING (latest,
   // non-terminated) turn merge into ONE live row rendered at the LAST thinking
   // position; the individual blocks disappear (思考内容 never unfolds line by
@@ -637,6 +637,7 @@ function ChatTurn({
     });
     const lastThink = thinkIdx.length ? thinkIdx[thinkIdx.length - 1] : -1;
     turn.body.forEach((b, i) => {
+      if (b.type === "meta") return;
       if (b.type === "thinking") {
         if (i === lastThink) bodyBlocks.push({ block: null, live: thinkIdx.map((j) => turn.body[j]) });
         else bodyBlocks.push({ block: null, live: null });
@@ -645,7 +646,10 @@ function ChatTurn({
       }
     });
   } else {
-    for (const b of turn.body) bodyBlocks.push({ block: b, live: null });
+    for (const b of turn.body) {
+      if (b.type === "meta") continue;
+      bodyBlocks.push({ block: b, live: null });
+    }
   }
   return (
     <section className="chat-turn" data-testid="chat-turn">
@@ -657,7 +661,7 @@ function ChatTurn({
         <span className="turn-rule" aria-hidden />
         <div className="turn-pill" data-testid="turn-pill">
           <button
-            className={`turn-collapse ${collapsed ? "" : "open"}`}
+            className="turn-collapse"
             data-testid="turn-collapse"
             aria-expanded={!collapsed}
             aria-label={collapsed ? "展开本轮" : "折叠本轮"}
@@ -666,10 +670,6 @@ function ChatTurn({
           >
             <IconChevron size={11} />
           </button>
-          <span className="turn-avatar" style={{ background: `hsl(${hashHue(kind)} 58% 46%)` }} aria-hidden>
-            {initial}
-          </span>
-          <span className="turn-agent">{name}</span>
           {!!updatedAt && (
             <span className="turn-time" title="最后活动：本窗格输出流的最新更新时间">
               <Elapsed updatedAt={updatedAt} />
@@ -683,17 +683,8 @@ function ChatTurn({
               <span className="turn-chip" title="本轮耗时">
                 {stats.duration}
               </span>
+              <span className="sr-only" data-testid="chat-meta">{metaText}</span>
             </>
-          )}
-          {stats.steps > 0 && (
-            <span className="turn-chip" title="本轮工具调用步数">
-              {stats.steps} 步
-            </span>
-          )}
-          {stats.files.length > 0 && (
-            <span className="turn-chip" title="本轮涉及的文件数">
-              {stats.files.length} 文件
-            </span>
           )}
         </div>
       </div>
@@ -838,9 +829,11 @@ const ChatBlock = memo(
 );
 
 /**
- * V7 F1: user prompt re-laid out as a right-aligned card. A single short
- * line stays a quiet bubble; a multiline / markdown prompt becomes a
- * collapsible title + markdown body (mcode ChatPane user card).
+ * V7 F1 → V9 F2: user prompt two-state, right-aligned like the reference.
+ * A single short line stays a quiet bubble (--chat-user-bubble, ≤72%); a
+ * multiline prompt becomes a collapsible card (--chat-user-card, ≤80%) with
+ * a compact green title chip (icon + truncated first line + chevron) and a
+ * markdown body (mcode ChatPane user card).
  */
 function UserCard({ text }: { text: string }) {
   const lines = text.replace(/\s+$/, "").split("\n");
@@ -848,7 +841,7 @@ function UserCard({ text }: { text: string }) {
   const rich = lines.length > 1;
   const [open, setOpen] = useState(true);
   return (
-    <div className="chat-msg user" data-testid="msg-user">
+    <div className={`chat-msg user${rich ? " rich" : ""}`} data-testid="msg-user">
       <div className={`chat-bubble${rich ? " user-card" : ""}`}>
         {rich ? (
           <>
@@ -1878,7 +1871,9 @@ function Composer({ view, onPickView }: { view: ViewMode; onPickView: (v: ViewMo
   };
 
   return (
-    <div className="composer-wrap">
+    <div
+      className={`composer-wrap${layoutMode === "separate" && view === "chat" ? " chat-face" : ""}`}
+    >
       {error && <div className="inline-error">{error}</div>}
       <div
         ref={composerRef}
@@ -2129,12 +2124,14 @@ function Composer({ view, onPickView }: { view: ViewMode; onPickView: (v: ViewMo
                 {spinning ? <span className="status-spin" aria-hidden /> : <span className="status-dot" aria-hidden />}
                 <span className="status-word">{statusWord}</span>
               </div>
-              {/* 7) 发送 ⏎：描边矩形；working 态切红描边「■ 中断」 */}
+              {/* 7) 发送钮（V9 F4）：描边圆角方钮 ➤，恒可见；working 态切
+                 红描边「■ 中断」（--chat-danger） */}
               <button
                 type="button"
                 className={`tb-btn send-btn${working ? " stop" : ""}`}
                 data-testid="send-button"
                 title={working ? "中断（Ctrl+C）" : agent ? "发送" : "执行"}
+                aria-label={working ? "中断" : "发送"}
                 disabled={!paneId || (!working && !canSend && !sending)}
                 onClick={() => (working ? void interrupt(["ctrl+c"]) : void send())}
               >
@@ -2144,8 +2141,9 @@ function Composer({ view, onPickView }: { view: ViewMode; onPickView: (v: ViewMo
                   </>
                 ) : (
                   <>
-                    {sending ? "发送中" : "发送"}
-                    <kbd className="send-key">⏎</kbd>
+                    <IconSend size={14} />
+                    <span className="send-label">发送</span>
+                    <kbd className="send-kbd">⏎</kbd>
                   </>
                 )}
               </button>

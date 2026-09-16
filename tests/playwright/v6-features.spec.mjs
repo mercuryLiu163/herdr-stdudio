@@ -61,7 +61,12 @@ test.describe("F1 de-card typography", () => {
     }
   });
 
-  test("turn-header 无边框无盒底", async () => {
+  // NOTE(test-fix): V9 (docs/plans/2026-09-16-v9-datastream-style.md, 契约迁移
+  // v6 F2) re-semantics this contract: the [data-testid=turn-header] node stays
+  // borderless and unboxed, but the INNER divider pill is now allowed to carry
+  // a surface (--chat-divider-pill, reference 分隔丸). What must still hold is
+  // the pill sitting horizontally centered on the conversation face.
+  test("turn-header 无盒底；分隔丸允许有底色且水平居中", async () => {
     await seedAgent();
     const { page } = ctx;
     const header = page.getByTestId("turn-header").first();
@@ -71,12 +76,32 @@ test.describe("F1 de-card typography", () => {
       return { borderTopWidth: s.borderTopWidth, bg: s.backgroundColor };
     });
     expect(parseFloat(styles.borderTopWidth)).toBe(0);
-    // transparent or near-transparent background (no gray box)
+    // transparent or near-transparent background on the header node itself
+    // (the pill bg lives on the inner .turn-pill, not here)
     const rgba = styles.bg.match(/rgba?\(([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[,\s]+([\d.]+))?\)/);
     if (rgba) {
       const alpha = rgba[4] === undefined ? 1 : parseFloat(rgba[4]);
       expect(alpha).toBeLessThan(0.06);
     }
+    // the divider pill may carry the --chat-divider-pill surface: opaque bg
+    const pillBg = await page.getByTestId("turn-pill").first().evaluate((el) => getComputedStyle(el).backgroundColor);
+    const pillRgba = pillBg.match(/rgba?\(([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[,\s]+([\d.]+))?\)/);
+    expect(pillRgba, "pill bg should be rgb: " + pillBg).toBeTruthy();
+    if (pillRgba) {
+      const alpha = pillRgba[4] === undefined ? 1 : parseFloat(pillRgba[4]);
+      expect(alpha).toBeGreaterThan(0.5);
+    }
+    // …and the pill stays horizontally centered on the chat face
+    const delta = await page.evaluate(() => {
+      const p = document.querySelector("[data-testid='turn-pill']");
+      const t = document.querySelector("[data-testid='chat-thread']");
+      if (!p || !t) return null;
+      const pr = p.getBoundingClientRect();
+      const tr = t.getBoundingClientRect();
+      return Math.abs(pr.left + pr.width / 2 - (tr.left + tr.width / 2));
+    });
+    expect(delta).not.toBeNull();
+    expect(delta).toBeLessThanOrEqual(24);
   });
 
   test("工具行紧凑单行：无全宽横幅盒，点击展开详情", async () => {

@@ -217,7 +217,13 @@ test.describe("F4 ZCODE 对话流（非 agent 的 shell 转写）", () => {
     await expect(thread.getByTestId("msg-assistant")).not.toContainText("Thinking for");
   });
 
-  test("对话流通栏：用户和助手都铺满数据流区域", async () => {
+  // NOTE(test-fix): V9 (docs/plans/2026-09-16-v9-datastream-style.md, F2 用户
+  // 消息两态) turns the user message into the right-aligned compact element
+  // (单行=右对齐小气泡 / 多行=右对齐卡片), superseding the old "user fills the
+  // stream" width contract for msg-user. The migrated contract: assistant
+  // prose still fills the stream; the user message right-aligns to the
+  // thread's right edge instead.
+  test("对话流：助手通栏铺满，用户消息右对齐", async () => {
     const { sock, pane2, page } = ctx;
     await page.getByTestId("layout-separate").click();
     await api.paneSendInput(
@@ -235,20 +241,28 @@ test.describe("F4 ZCODE 对话流（非 agent 的 shell 转写）", () => {
     // 完成前（失败快照显示「原始输出」仍处于按下态），chat-thread 尚未挂载导致
     // threadW=0。契约不变（铺满测量），只是先等对话视图真正挂载。
     await page.getByTestId("chat-thread").waitFor({ state: "visible", timeout: 10000 });
-    const { userW, asstW, threadW, asstText } = await page.evaluate(() => {
+    const { userW, userRight, threadW, threadRight, asstW, asstText } = await page.evaluate(() => {
       const thread = document.querySelector("[data-testid='chat-thread']");
       const user = document.querySelector("[data-testid='msg-user']");
       const asst = document.querySelector("[data-testid='msg-assistant']");
+      const ur = user?.getBoundingClientRect();
+      const tr = thread?.getBoundingClientRect();
       return {
-        userW: user?.getBoundingClientRect().width ?? 0,
+        userW: ur?.width ?? 0,
+        userRight: ur ? ur.right : 0,
+        threadW: tr?.width ?? 0,
+        threadRight: tr ? tr.right : 0,
         asstW: asst?.getBoundingClientRect().width ?? 0,
-        threadW: thread?.getBoundingClientRect().width ?? 0,
         asstText: asst?.textContent ?? "",
       };
     });
     expect(threadW).toBeGreaterThan(400);
-    expect(userW / threadW).toBeGreaterThan(0.85);
+    // assistant prose keeps the full-width document flow
     expect(asstW / threadW).toBeGreaterThan(0.85);
+    // user message is the compact right-aligned element (V9 F2): no longer
+    // stretched, and its right edge hugs the thread's right edge
+    expect(userW / threadW).toBeLessThan(0.85);
+    expect(threadRight - userRight).toBeLessThanOrEqual(4);
     expect(asstText.replace(/\s+/g, "")).toContain("没问题");
     expect(asstText).toContain("随时说");
   });
@@ -344,7 +358,11 @@ test.describe("F5 composer toolbar (V9 restyle)", () => {
     await expect(page.getByTestId("view-chip")).toHaveCount(0);
   });
 
-  test("几何：控件行单行、按钮两两不相交、发送钮完整可见", async () => {
+  // NOTE(test-fix): V9 F4 (docs/plans/2026-09-16-v9-datastream-style.md) —
+  // 工具条分段去边框（无边框文字+图标段），发送钮改为描边圆角方钮。几何契约
+  // （单行/不相交/发送可见）保留，并按 PRD 增补形态断言：普通段无描边、
+  // 发送钮 ≥30px 高、圆角 ≈10px。
+  test("几何：控件行单行、按钮两两不相交、发送钮完整可见、段无边框", async () => {
     await seedAgentV7();
     const { page } = ctx;
     const rects = await page.evaluate(() => {
@@ -359,11 +377,28 @@ test.describe("F5 composer toolbar (V9 restyle)", () => {
           const send = document.querySelector("[data-testid='send-button']")?.getBoundingClientRect();
           return send ? send.right <= rowR.right + 1 && send.left >= rowR.left - 1 : false;
         })(),
+        // V9 F4 form: regular toolbar segments are borderless (transparent)
+        segmentBorderless: (() => {
+          const seg = [...row.querySelectorAll(".tb-btn")].find((b) => !b.classList.contains("send-btn"));
+          if (!seg) return false;
+          const c = getComputedStyle(seg).borderTopColor;
+          return c === "transparent" || /rgba\(\s*0,\s*0,\s*0,\s*0\s*\)/.test(c);
+        })(),
+        // …while the send control is the outlined rounded square
+        sendForm: (() => {
+          const send = document.querySelector("[data-testid='send-button']");
+          if (!send) return false;
+          const r = send.getBoundingClientRect();
+          const radius = parseFloat(getComputedStyle(send).borderTopLeftRadius);
+          return r.height >= 30 && radius > 6;
+        })(),
       };
     });
     expect(rects.singleRow, "controls on one row").toBeTruthy();
     expect(rects.noOverlap, "buttons must not overlap").toBeTruthy();
     expect(rects.sendInside, "send button inside toolbar").toBeTruthy();
+    expect(rects.segmentBorderless, "toolbar segments must be borderless (V9 F4)").toBeTruthy();
+    expect(rects.sendForm, "send button is the outlined rounded square (V9 F4)").toBeTruthy();
   });
 });
 test.describe("F6 thinking live", () => {

@@ -59,17 +59,28 @@ async function seedAgent() {
 
 // ---------- F1 对话显示效果复刻 ----------
 test.describe("F1 turn display", () => {
-  test("turn 头部条：头像 + 名称 + 步数/文件数统计 + 折叠", async () => {
+  // NOTE(test-fix): V9 (docs/plans/2026-09-16-v9-datastream-style.md, F1 回合
+  // 分隔丸) replaced the old header bar (avatar + agent name + step/file chips)
+  // with a centered divider pill `› HH:MM:SS · 时长`. The contract migrates to
+  // the new form: pill exists on the hairline, carries the isolated HH:MM:SS
+  // clock and the turn duration, and still collapses/expands the turn body.
+  // Avatar/name/step/file assertions are deliberately INVERTED (must NOT be
+  // present — the reference pill has none of them).
+  test("回合分隔丸：时间 + 时长 + 折叠（无头像/名称/步数/文件 chips）", async () => {
     await seedAgent();
     const { page } = ctx;
     const header = page.getByTestId("turn-header").first();
     await expect(header).toBeVisible();
-    await expect(header).toContainText("e2e-fake"); // agent display name
-    // steps = tool blocks (>=1), files = 2 deduped paths
-    await expect(header).toContainText(/1 步|2 步/);
-    await expect(header).toContainText("2 文件");
-    // duration chip appears only if meta present in turn
-    await expect(header).toContainText("12s");
+    const pill = header.getByTestId("turn-pill");
+    await expect(pill).toBeVisible();
+    // V9 F1: no avatar initials, no agent display name, no step/file chips
+    await expect(pill).not.toContainText("e2e-fake");
+    await expect(pill).not.toContainText(/步/);
+    await expect(pill).not.toContainText(/文件/);
+    // isolated clock keeps the HH:MM:SS format (V7 `.turn-time` contract)
+    await expect(pill.locator(".turn-time")).toHaveText(/^\d{2}:\d{2}:\d{2}$/);
+    // duration chip appears only if meta present in turn (seed: Worked for 12s)
+    await expect(pill).toContainText("12s");
     // collapse interaction: chevron click hides turn body
     const body = page.getByTestId("chat-immersive").locator("[data-testid='msg-tool']").first();
     await expect(body).toBeVisible();
