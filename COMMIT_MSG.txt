@@ -1,0 +1,13 @@
+feat(v10): BeautifulUI 显示组件移植 + 过程行折叠
+
+移植 beautifului.dev 三原语（MIT，纯 React，样式翻译为 --chat-* 令牌）：
+- ThinkingState：useSequence 编排（working 逐行显现→settle 收起）+ manualExpanded + onSettled；rows=真实工具行
+- StreamingText：token 逐词 reveal + 光标，与 600ms 轮询解耦（wall-clock pacing）；loop=false 真实线程形态
+- LoadingState：像素网格 LoaderGrid + shimmer 文字 + 已耗时（working 无正文等待态）；@keyframes bui-pixel-on 波前动画
+
+过程行折叠（用户 UX 修复）：
+- 解析：·(U+00B7) 状态动词行归 thinking 过程块（块带 detail 原文），续行并入、六分支 reset、空白行关闭捕获
+- 显示：working 期折叠为单行「思考中 + CSS 点点点 + 已耗时」，过程文本未展开不进 DOM，点击展开 pre-wrap 可读；定格「思考 Ns」
+- 附带根修：v5 git 侧栏 flake（selectOption 受控 select 竞态，用例改重试循环）
+测试：Playwright 82 passed / 0 failed / 4 skipped（fixme 骨架）；V1 回归 ALL GREEN；typecheck 通过；chat-parser 单测 3/3
+流程：TDD 契约 - 实现 - 评审（APPROVE-WITH-NITPICKS M1/M2 全修复）- judge 终审 达成

@@ -402,16 +402,30 @@ test.describe("F5 composer toolbar (V9 restyle)", () => {
   });
 });
 test.describe("F6 thinking live", () => {
-  test("working 期：thinking 合并为单行实时行 + spinner", async () => {
+  // NOTE(test-fix): V10 (docs/plans/2026-09-16-v10-beautifului-display.md, F2)
+  // replaces the V9 single-row ThinkingLive with the BeautifulUI
+  // ThinkingState trace (adapted from beautifului.dev, MIT). The merge
+  // semantics survive: `thinking-live` / `thinking-spinner` testids are kept
+  // on the component root / working spinner; the trace additionally shows
+  // the turn's real tool rows; thinking stays out of msg-* content. On turn
+  // end the trace is swapped for the frozen V4 思考 rows (定格不变).
+  test("working 期：thinking 合并为 ThinkingState trace（spinner + 工具行）", async () => {
     await seedAgentV7();
     const { page, sock, pane2 } = ctx;
+    const live = page.getByTestId("thinking-live");
+    await live.waitFor({ state: "visible", timeout: 8000 });
+    // the trace auto-expands past its intro stage and shows the turn's real
+    // tool row (name + mono argument)
+    await expect(live).toContainText("Edit");
+    await expect(live).toContainText("src/index.js");
+    await expect(page.getByTestId("thinking-spinner")).toBeVisible();
+    // more thinking lines mid-work: still ONE live trace, no frozen rows
     await api.paneSendInput(
       sock,
       pane2.pane_id,
       'echo "Thought for 3s (ctrl+o to expand)"; echo "Thought for 5s (ctrl+o to expand)"',
     );
     await page.waitForTimeout(1200);
-    const live = page.getByTestId("thinking-live");
     await expect(live).toBeVisible();
     await expect(page.getByTestId("thinking-spinner")).toBeVisible();
     expect(await page.getByTestId("thinking-row").count()).toBeLessThanOrEqual(1);
@@ -436,6 +450,155 @@ test.describe("F6 thinking live", () => {
     if (await live.count()) {
       await expect(live).toContainText(/思考|Thought/);
     }
+  });
+});
+
+// ---------- V10 BeautifulUI display primitives ----------
+// NOTE(test-fix): V10 (docs/plans/2026-09-16-v10-beautifului-display.md) adds
+// the beautifului.dev primitives (MIT): LoadingState (F3) under
+// [data-testid=bui-loading], and the polling-decoupled StreamingText reveal
+// (F1) on the live turn's last assistant block.
+test.describe("V10 BeautifulUI primitives", () => {
+  test("working 无正文 → bui-loading 可见；首个 assistant token 后消失", async () => {
+    const { sock, pane2, page } = ctx;
+    await api.paneSendInput(sock, pane2.pane_id, 'echo "\u276f \u7b49\u5f85\u6b63\u6587\u6d4b\u8bd5"');
+    await api.paneReportAgent(sock, pane2.pane_id, "e2e-fake", "working");
+    await page.waitForFunction(
+      (pid) => window.__herdr_store.getState().agents.some((a) => a.pane_id === pid),
+      pane2.pane_id,
+      { timeout: 10000 },
+    );
+    await page.locator(".pane-chip").filter({ hasText: /e2e-fake agent|E2E/ }).first().click().catch(() => {});
+    await page.getByTestId("chat-thread").waitFor({ state: "visible", timeout: 10000 });
+    const loading = page.getByTestId("bui-loading");
+    await expect(loading).toBeVisible();
+    await expect(loading).toContainText("\u7b49\u5f85\u8f93\u51fa");
+    // first assistant token arrives → the grid disappears
+    await api.paneSendInput(
+      sock,
+      pane2.pane_id,
+      'echo "\u8fd9\u662f\u52a9\u624b\u7684\u7b2c\u4e00\u4e2a\u6b63\u6587 token"',
+    );
+    await expect(loading).toHaveCount(0);
+    await expect(page.getByTestId("msg-assistant").first()).toContainText("\u7b2c\u4e00\u4e2a\u6b63\u6587");
+  });
+
+  test("流式追赶：轮询注入多 token 后 reveal ≤2.5s 追平全量", async () => {
+    await seedAgentV7();
+    const { sock, pane2, page } = ctx;
+    // NOTE(test-fix): 原种子把 tail 直接拼进命令文本，靠「tail 在 transcript
+    // 出现两次」区分命令回显与输出；但回显行随窗格宽度折行 + 夹在中间的
+    // 半成品引号拼接让第二次出现永远等不到（基线两次复现超时）。改为变量
+    // 断点法：`$t="逐词 reveal 需要"; echo "${t}在两秒半内…"` —— 字面 tail
+    // 被 `${t}` 隔断，命令回显里不存在完整 tail；变量展开的输出行是 tail 的
+    // 唯一来源（该次 600ms 轮询一次性注入全部新 token）。`$t`/`${t}` 在
+    // PowerShell 与 bash 语义一致（herdr 窗格两者皆可能）。store 首现即输出
+    // 到达，reveal 必须在 ≤2.5s 内追平（waitFor 超时即契约）。
+    const tail = "\u9010\u8bcd reveal \u9700\u8981\u5728\u4e24\u79d2\u534a\u5185\u8ffd\u5e73\u5168\u91cf\u6587\u672c";
+    await api.paneSendInput(
+      sock,
+      pane2.pane_id,
+      'echo "\u6d41\u5f0f\u8ffd\u8d76\u9a8c\u8bc1\u6bb5\u843d\uff1a\u8f6e\u8be2\u4e00\u6b21\u6ce8\u5165\u591a\u4e2a"; $t="\u9010\u8bcd reveal \u9700\u8981"; sleep 2; echo "${t}\u5728\u4e24\u79d2\u534a\u5185\u8ffd\u5e73\u5168\u91cf\u6587\u672c"',
+    );
+    // store has the OUTPUT (the echoed command cannot contain the literal
+    // tail — the ${t} break sees to that)
+    await page.waitForFunction(
+      (t) => {
+        const s = window.__herdr_store.getState();
+        const o = s.outputs[s.activePaneId];
+        return !!o && o.text.includes(t);
+      },
+      tail,
+      { timeout: 15000 },
+    );
+    // …and the reveal must be complete ≤2.5s later (waitFor timeout enforces)
+    const t0 = Date.now();
+    await page.waitForFunction(
+      (t) => {
+        const els = document.querySelectorAll("[data-testid='msg-assistant']");
+        const el = els[els.length - 1];
+        return !!el && (el.textContent ?? "").replace(/\s+/g, "").includes(t.replace(/\s+/g, ""));
+      },
+      tail,
+      { timeout: 2500 },
+    );
+    expect(Date.now() - t0).toBeLessThanOrEqual(2600);
+  });
+
+  // NOTE(test-fix): V10 任务B 过程行规范化 — Claude Code 的 `·`(U+00B7) 状态
+  // 动词行（Discombobulating/Puzzling/Flexing…）曾被当作普通文本，以未排版
+  // 多行块漏进对话流。现契约：`·` 行 + 无 marker 续行归为 thinking 过程块
+  // （chat-parser.ts）；working 期合并进 ThinkingState 后一律单行「思考中 +
+  // 动画点点点 + 耗时」，已捕获的过程文本不进 DOM，点击行才挂载可见；回合
+  // 终结后定格为折叠思考行，展开同样可见原始过程文本。
+  test("· 状态动词行不进正文：working 期单行思考中，点击行见原始过程文本", async () => {
+    const { sock, pane2, page } = ctx;
+    await api.paneSendInput(
+      sock,
+      pane2.pane_id,
+      'echo "\u276f \u5207\u6362\u4e00\u4e0b\u6743\u9650\u6a21\u5f0f"; echo "\u00b7 Discombobulating... between manual mode,"; echo "auto-accept edit mode, and plan mode"; echo "\u23fa Bash(echo mode-switched)"',
+    );
+    await api.paneReportAgent(sock, pane2.pane_id, "e2e-fake", "working");
+    await page.waitForFunction(
+      (pid) => window.__herdr_store.getState().agents.some((a) => a.pane_id === pid),
+      pane2.pane_id,
+      { timeout: 10000 },
+    );
+    await page.locator(".pane-chip").filter({ hasText: /e2e-fake agent|E2E/ }).first().click().catch(() => {});
+    await page.getByTestId("chat-thread").waitFor({ state: "visible", timeout: 10000 });
+    // the process text has arrived in the store…
+    await page.waitForFunction(
+      () => {
+        const s = window.__herdr_store.getState();
+        const o = s.outputs[s.activePaneId];
+        return !!o && o.text.includes("plan mode");
+      },
+      null,
+      { timeout: 10000 },
+    );
+    const thread = page.getByTestId("chat-thread");
+    const live = page.getByTestId("thinking-live");
+    await live.waitFor({ state: "visible", timeout: 8000 });
+    await expect(live).toContainText("\u601d\u8003\u4e2d");
+    // working 期一律单行：有工具行也不自动展开（trace 文本压制 auto-expand）
+    const head = live.locator(".bui-thinking-head");
+    await expect(head).toHaveAttribute("aria-expanded", "false");
+    // 原始过程文本不出现在可见正文（根本不在 DOM）
+    await expect(thread).not.toContainText("Discombobulating");
+    // …耗时在 1s 后出现
+    await page.waitForTimeout(1200);
+    await expect(live).toContainText(/\d+s/);
+    await expect(page.getByTestId("thinking-spinner")).toBeVisible();
+    // 点击行 → 已捕获的原始过程文本可见
+    await head.click();
+    await expect(head).toHaveAttribute("aria-expanded", "true");
+    await expect(live).toContainText("Discombobulating... between manual mode,");
+    await expect(live).toContainText("auto-accept edit mode, and plan mode");
+
+    // 回合终结 → 定格折叠思考行；展开同样可见原始过程文本
+    await api.paneSendInput(
+      sock,
+      pane2.pane_id,
+      'echo "\u273b Frosting... (7s \u00b7 thinking)"; echo "\u597d\u4e86\u3002"',
+    );
+    await api.paneReportAgent(sock, pane2.pane_id, "e2e-fake", "idle");
+    await page.waitForFunction(
+      () => {
+        const s = window.__herdr_store.getState();
+        return s.agents.some((a) => ["idle", "done"].includes(a.agent_status));
+      },
+      null,
+      { timeout: 10000 },
+    );
+    await page.waitForTimeout(800);
+    await expect(page.getByTestId("thinking-live")).toHaveCount(0);
+    // 两个定格思考行：过程块（思考 …）与 Frosting 时长行（思考 7s）
+    const rows = page.getByTestId("thinking-row");
+    await expect(rows.filter({ hasText: "7s" })).toHaveCount(1);
+    await expect(thread).not.toContainText("Discombobulating");
+    // 过程块定格后展开 → 原始文本可见（未展开时不挂载）
+    await rows.first().locator("summary").click();
+    await expect(thread).toContainText("Discombobulating... between manual mode,");
   });
 });
 

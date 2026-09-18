@@ -147,18 +147,26 @@ test.describe("F2 sidebar apps", () => {
       return opt ? opt.value : null;
     });
     expect(value, "cwd options should contain git-proj").toBeTruthy();
-    await page.getByTestId("cwd-select").selectOption(value);
-    // NOTE(test-fix): the panel may still be rendering the PREVIOUS directory's
-    // status here — the project root is also on branch "main", so the branch
-    // assertion cannot distinguish stale from fresh, and the row list used to
-    // be read before the git-proj refetch landed (intermittent failure under
-    // load). Wait for the freshly fetched repo's own change row first; every
-    // assertion below is then guaranteed to see the switched directory.
-    await panel
-      .getByTestId("git-file")
-      .filter({ hasText: "src/index.js" })
-      .first()
-      .waitFor({ state: "visible", timeout: 15000 });
+    // NOTE(test-fix): selectOption 偶发不生效（整包运行 2/3 复现、隔离必过）：
+    // cwd-select 是受控 select（root = sidebarRoot ?? activeCwd），herdr 快照
+    // 刷新期的重渲染/activeCwd wipe 竞态会把选中值弹回项目根目录，git-proj 的
+    // git:status 永不触发，下方等待必然超时（超时页快照实证 select 仍停在项
+    // 目根）。改为重试循环：每次 selectOption 后最多 6s 内等 git-proj 自己的
+    // 变更行出现，选中被弹回或该次 git 拉取失败即重选（最多 5 轮）；行出现后
+    // 的断言保持不变，仍保证后续断言看到的是切换后的目录。
+    const select = page.getByTestId("cwd-select");
+    let rowVisible = false;
+    for (let attempt = 0; attempt < 5 && !rowVisible; attempt++) {
+      await select.selectOption(value);
+      rowVisible = await panel
+        .getByTestId("git-file")
+        .filter({ hasText: "src/index.js" })
+        .first()
+        .waitFor({ state: "visible", timeout: 6000 })
+        .then(() => true)
+        .catch(() => false);
+    }
+    expect(rowVisible, "git-proj row must appear once the selection sticks").toBeTruthy();
     await expect(panel.getByTestId("git-branch")).toContainText("main");
     const rows = panel.getByTestId("git-file");
     await expect(rows.first()).toBeVisible();

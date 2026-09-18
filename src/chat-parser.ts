@@ -76,6 +76,19 @@
  *          status), not a chat block — see {@link extractComposerStatus};
  *        - trailing TUI clocks (`1:14 AM`) and box-drawing leftovers on
  *          user rows are stripped.
+ *
+ * V10 additions (BeautifulUI display + 过程行规范化 UX fix):
+ *        - a line starting with the middle dot `·` (U+00B7) is an agent
+ *          STATUS-VERB line (Claude Code: `· Discombobulating… between
+ *          manual mode, auto-accept edit mode, and plan mode`), never a
+ *          tool call and never assistant prose. The tool-marker set stays
+ *          `⏺ ● • ◆` — `·` is deliberately NOT part of it; the line opens
+ *          a `thinking` (process) block whose `detail` keeps the captured
+ *          raw text, and following marker-less lines are captured into the
+ *          same block until a structural line (user / tool / meta /
+ *          thinking / fence…) closes the capture. The UI collapses these
+ *          blocks to a single live row; the raw text is only visible on
+ *          expand (see MainPane / ThinkingState).
  */
 
 export type BlockType = "user" | "assistant" | "tool" | "code" | "meta" | "thinking";
@@ -96,6 +109,10 @@ export interface Block {
   images?: string[];
   /** tool blocks: file/directory names of a multi-column listing, grid-rendered */
   files?: string[];
+  /** thinking (process) blocks: the captured raw process text (`·` status
+   *  lines + their marker-less continuations). Never rendered collapsed —
+   *  the UI shows it only when the row is expanded (V10 UX fix). */
+  detail?: string;
 }
 
 /** Remove ANSI escape sequences (CSI, OSC, charset selection, stray C0). */
@@ -450,11 +467,27 @@ export function isUserContinuation(line: string): boolean {
 const TREE_PREFIX_RE = /^[└┌┐┘│┃┝┠┣├┤┬┴┼╭╮╯╰╔╗╚╝╠╣╦╩╬═║─┄┅┆┇┈┉┊⎾⎿⏋⏌\s]+/;
 
 /**
- * A tool-call marker line (V6 F2): one of the `⏺ ● • ◆` glyphs followed by the
- * line's remaining text. The marker alone is not enough — see
- * {@link validToolCall}.
+ * A tool-call marker line (V6 F2): the `⏺` / `●` glyph followed by the line's
+ * remaining text. This pair is the AUTHORITATIVE tool set — the other glyphs
+ * agent TUIs draw are deliberately handled elsewhere and were NEVER part of
+ * this regex:
+ *   - `•` is markdown list furniture (flushAssistant rewrites it to "- ");
+ *   - `◆` is a block boundary / ZCODE chrome glyph (isChromeLine drops the
+ *     ZCODE rows long before this point);
+ *   - `·` (U+00B7) is the Claude Code status-verb prefix — routed to a
+ *     thinking (process) block by {@link PROCESS_MARKER_RE} (V10 过程行
+ *     规范化), never a tool.
+ * The marker alone is not enough — see {@link validToolCall}.
  */
 const TOOL_MARKER_RE = /^[⏺●]\s?(.*)$/;
+
+/**
+ * An agent status-verb line (V10): `· ` + narration. Unlike the `⏺`/`●` tool
+ * glyphs this one announces transient process chatter, never a structured
+ * call — the line (and its marker-less continuations) becomes a thinking
+ * (process) block carrying the raw text in `detail`.
+ */
+const PROCESS_MARKER_RE = /^\u00b7\s?(.*)$/;
 
 /**
  * Sentence-starter words that can never begin a tool name (V6 F2): agent prose
@@ -651,6 +684,13 @@ export function parseTranscript(text: string): Block[] {
   let userCtx: Block | null = null;
   /** Swallow TUI chain-of-thought between Kneading… and Frosting…(Ns). */
   let thinkingCtx = false;
+  /**
+   * Process block currently capturing `·` status-verb lines and their
+   * marker-less continuation lines (V10). Any structural line (user input,
+   * tool call, meta, thinking, fence, listing…) closes the capture — the
+   * branches below reset it exactly where they reset `userCtx`.
+   */
+  let processCtx: Block | null = null;
 
   const flushAssistant = () => {
     if (!assistantBuf.length) return;
@@ -691,8 +731,16 @@ export function parseTranscript(text: string): Block[] {
     // and the remainder classifies by its own content.
     const trimmed = line.replace(TREE_PREFIX_RE, "").trim();
 
-    // Collapse blank runs.
-    if (!trimmed) continue;
+    // Collapse blank runs. A blank line also closes the process capture
+    // (V10 任务B review M2): a wrapped `·` status block is CONTIGUOUS lines;
+    // whatever follows a blank line is a new logical block — most importantly
+    // the agent's marker-less final prose after a status block must fall back
+    // to the assistant stream instead of being swallowed into the collapsed
+    // process row.
+    if (!trimmed) {
+      processCtx = null;
+      continue;
+    }
     // Drop rule/box decoration lines.
     if (isSeparatorLine(trimmed)) continue;
     if (isChromeLine(trimmed) || isChromeLine(line.trim())) continue;
@@ -703,6 +751,7 @@ export function parseTranscript(text: string): Block[] {
       flushAssistant();
       fileCtx = null;
       userCtx = null;
+      processCtx = null;
       const last = blocks[blocks.length - 1];
       if (last?.type === "thinking") {
         if (cook.duration) last.text = cook.duration;
@@ -717,6 +766,7 @@ export function parseTranscript(text: string): Block[] {
       flushAssistant();
       fileCtx = null;
       userCtx = null;
+      processCtx = null;
       thinkingCtx = false;
       const last = blocks[blocks.length - 1];
       if (last?.type === "thinking") {
@@ -737,6 +787,7 @@ export function parseTranscript(text: string): Block[] {
       flushAssistant();
       fileCtx = null;
       userCtx = null;
+      processCtx = null;
       codeBuf = { lang: (fence[1] ?? "").toLowerCase(), lines: [] };
       continue;
     }
@@ -759,6 +810,7 @@ export function parseTranscript(text: string): Block[] {
       flushAssistant();
       fileCtx = null;
       userCtx = null;
+      processCtx = null;
       blocks.push({ type: "meta", text: meta });
       continue;
     }
@@ -771,6 +823,7 @@ export function parseTranscript(text: string): Block[] {
     if (userRest !== null) {
       flushAssistant();
       fileCtx = null;
+      processCtx = null;
       if (userRest) {
         const block: Block = { type: "user", text: userRest };
         blocks.push(block);
@@ -807,6 +860,7 @@ export function parseTranscript(text: string): Block[] {
       }
       flushAssistant();
       userCtx = null;
+      processCtx = null; // a real call closes the process capture (V10)
       // V6 F2 / review m1: the ROW shows the call-form argument ("npm run
       // build"), the expanded detail shows the full `Name(args)` body —
       // never "Bash(Bash…)" twice. Non-call forms: both carry the body.
@@ -830,6 +884,32 @@ export function parseTranscript(text: string): Block[] {
       continue;
     }
     userCtx = null;
+
+    // V10 过程行规范化 (Task B): `·` status-verb lines + their marker-less
+    // continuation lines are process narration — a thinking block carrying
+    // the raw text in `detail`. They never reach the assistant stream (the
+    // unstyled multi-line status block from the user report leaked exactly
+    // this way) and never the tool path (`·` is not a tool marker). The
+    // capture closes on any structural line (resets above) or on a line that
+    // would open a new block on its own (markdown list, fence, marker…);
+    // consecutive `·` lines simply extend the open block.
+    if (processCtx) {
+      if (!isNewBlockLine(trimmed)) {
+        processCtx.detail = `${processCtx.detail ?? ""}\n${trimmed}`;
+        continue;
+      }
+      processCtx = null; // structural line closes the capture
+    }
+    const process = trimmed.match(PROCESS_MARKER_RE);
+    if (process) {
+      flushAssistant();
+      fileCtx = null;
+      userCtx = null;
+      const block: Block = { type: "thinking", text: "", detail: trimmed };
+      blocks.push(block);
+      processCtx = block;
+      continue;
+    }
 
     assistantBuf.push(trimmed);
   }

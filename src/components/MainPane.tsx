@@ -8,7 +8,6 @@ import {
   turnStats,
   looksLikeChat,
   extractComposerStatus,
-  formatDurationSeconds,
   IMAGE_EXT_RE,
 } from "../chat-parser";
 import type { Block, Turn } from "../chat-parser";
@@ -18,6 +17,12 @@ import { paneLayout, paneResize, agentPrompt, paneSendText, paneSendKeys, agentS
 import { slashCommandsFor, filterSlashCommands } from "../slash-commands";
 import { IconBook, IconClock, IconFile, IconGrid, IconPaperclip, IconPlus, IconSend, IconStop, IconTerminal, IconUserMsg } from "./icons";
 import { IconChevron, IconColumns, IconMosaic } from "./icons";
+// V10 BeautifulUI primitives (adapted from beautifului.dev, MIT) — live
+// thinking trace, polling-decoupled streaming prose, waiting-for-output grid.
+import ThinkingState from "./bui/ThinkingState";
+import type { ThinkingRow } from "./bui/ThinkingState";
+import StreamingText, { tokenizeStreaming } from "./bui/StreamingText";
+import LoadingState from "./bui/LoadingState";
 
 const statusLabel: Record<string, string> = {
   working: "工作中",
@@ -485,6 +490,8 @@ function sameBlock(a: Block, b: Block): boolean {
     // that only alters it must still repaint the row.
     a.summary === b.summary &&
     a.lang === b.lang &&
+    // V10 任务B: a growing captured process text must repaint its row.
+    (a.detail ?? "") === (b.detail ?? "") &&
     (a.images ?? []).join("\n") === (b.images ?? []).join("\n") &&
     (a.files ?? []).join("\n") === (b.files ?? []).join("\n")
   );
@@ -569,25 +576,15 @@ const Elapsed = memo(
 );
 
 /**
- * F6 the live thinking row. While the agent is working, every thinking block
- * of the turn merges into THIS single row (spinner = pure CSS transform
- * keyframes, never JS-driven) + "思考中 Ns"; when the turn ends the row is
- * replaced by the frozen per-block 思考 rows again.
+ * V10 F2: the V9 `ThinkingLive` single-row spinner is REPLACED by the
+ * BeautifulUI ThinkingState trace (src/components/bui/ThinkingState.tsx).
+ * The contract testids live on: `thinking-live` (component root) and
+ * `thinking-spinner` (the working spinner). While the agent works, the
+ * turn's thinking blocks merge into THIS trace: rows = the turn's real tool
+ * rows (last 4), header = "思考中 Ns" shimmer + spinner; when the turn
+ * settles (duration meta / agent idle) the trace is swapped for the frozen
+ * V4 per-block 思考 rows again (回合终结后定格行为不变).
  */
-function ThinkingLive({ blocks }: { blocks: Block[] }) {
-  const total = blocks.reduce((sum, b) => {
-    const m = b.text.match(/([\d.]+)\s*s/i);
-    return m ? sum + parseFloat(m[1]) : sum;
-  }, 0);
-  return (
-    <div className="chat-thinking live" data-testid="thinking-live" title="Agent 正在思考 — 流式思考已实时合并">
-      <span className="thinking-spinner" data-testid="thinking-spinner" aria-hidden />
-      <span className="thinking-live-label">
-        思考中{total > 0 ? ` ${formatDurationSeconds(total)}` : "…"}
-      </span>
-    </div>
-  );
-}
 
 /**
  * One conversation turn (V9 F1): the user prompt, then a centered divider
@@ -621,28 +618,73 @@ function ChatTurn({
   // pill now — drop the body row to avoid double display; the pill keeps
   // a locator-visible .sr-only copy so the V4 chat-meta contract holds.
   const metaText = turn.body.find((b) => b.type === "meta")?.text ?? "";
-  // F6: while the agent is working, thinking blocks of the ONGOING (latest,
-  // non-terminated) turn merge into ONE live row rendered at the LAST thinking
-  // position; the individual blocks disappear (思考内容 never unfolds line by
-  // line while streaming). ChatThread only marks the LAST turn as working —
-  // history never revives the spinner. A turn that already carries its
-  // duration meta ("Worked for 28s") has ENDED — its thinking is settled
-  // history and stays a frozen collapsible 思考 row (V4 F1 contract).
+  // F6 (V10): while the agent is working, thinking blocks of the ONGOING
+  // (latest, non-terminated) turn merge into ONE ThinkingState trace
+  // rendered at the LAST thinking position; the individual blocks disappear.
+  // The trace's rows are the turn's REAL tool rows (last 4 summaries). The
+  // settle edge — duration meta arriving — unmounts the trace and restores
+  // the frozen per-block 思考 rows (V4 F1 contract: 回合终结后定格不变).
+  // ChatThread only marks the LAST turn as working — history never revives
+  // the spinner. A turn that already carries its duration meta ("Worked for
+  // 28s") has ENDED: everything renders frozen.
   const turnLive = working && stats.duration === null;
-  const bodyBlocks: Array<{ block: Block | null; live: Block[] | null }> = [];
+  // V10 F3: the waiting-for-output grid shows while the agent works but the
+  // turn carries no agent-produced body yet; the first assistant/tool block
+  // makes it disappear. A thinking-only turn is already announced by the
+  // ThinkingState trace, so the grid waits for actual output emptiness.
+  const hasAgentBody = turn.body.some(
+    (b) => b.type === "assistant" || b.type === "tool" || b.type === "code",
+  );
+  const showLoading = turnLive && !hasAgentBody && !turn.body.some((b) => b.type === "thinking");
+  // ThinkingState rows: the turn's real tool rows (最近几条, PRD: 3-5).
+  // Row anatomy follows the source's tool-trace row: name + mono argument.
+  const toolRows: ThinkingRow[] = turnLive
+    ? turn.body
+        .filter((b) => b.type === "tool")
+        .slice(-4)
+        .map((b) => ({
+          primary: b.toolName ?? "tool",
+          secondary: b.summary ?? b.text,
+          mono: true,
+        }))
+    : [];
+  // V10 任务B 过程行规范化: the turn's captured raw process text (the `·`
+  // status-verb lines and their continuations, parsed into thinking blocks'
+  // `detail`). Passed to the live trace so a user click can reveal it — the
+  // text itself never renders while working (ThinkingState suppresses its
+  // auto-expand when a trace is present, keeping the row a single line).
+  const liveTrace = turnLive
+    ? turn.body
+        .filter((b) => b.type === "thinking")
+        .map((b) => b.detail ?? "")
+        .filter(Boolean)
+        .join("\n\n")
+    : "";
+  const bodyBlocks: Array<{ block: Block | null; live: Block[] | null; stream?: boolean }> = [];
   if (turnLive) {
     const thinkIdx: number[] = [];
     turn.body.forEach((b, i) => {
       if (b.type === "thinking") thinkIdx.push(i);
     });
     const lastThink = thinkIdx.length ? thinkIdx[thinkIdx.length - 1] : -1;
+    // V10 F1: the LAST body block, when it is assistant prose, streams
+    // through StreamingText (poll-decoupled word reveal) instead of the
+    // frozen markdown — every earlier block is already settled history.
+    let lastStreamable = -1;
+    turn.body.forEach((b, i) => {
+      if (b.type !== "meta") lastStreamable = i;
+    });
     turn.body.forEach((b, i) => {
       if (b.type === "meta") return;
       if (b.type === "thinking") {
         if (i === lastThink) bodyBlocks.push({ block: null, live: thinkIdx.map((j) => turn.body[j]) });
         else bodyBlocks.push({ block: null, live: null });
       } else {
-        bodyBlocks.push({ block: b, live: null });
+        bodyBlocks.push({
+          block: b,
+          live: null,
+          stream: i === lastStreamable && b.type === "assistant",
+        });
       }
     });
   } else {
@@ -689,12 +731,24 @@ function ChatTurn({
         </div>
       </div>
       )}
+      {!collapsed && showLoading && <LoadingState label="等待输出" />}
       {!collapsed &&
         bodyBlocks.map((entry, bi) =>
           entry.live ? (
-            <ThinkingLive key={`live${bi}`} blocks={entry.live} />
+            <ThinkingState
+              key={`live${bi}`}
+              rows={toolRows}
+              trace={liveTrace || undefined}
+              done={stats.duration ? `Thought for ${stats.duration}` : undefined}
+            />
           ) : entry.block ? (
-            <ChatBlock key={`b${bi}`} block={entry.block} cwd={cwd} cwds={cwds} />
+            entry.stream ? (
+              <div className="chat-msg assistant" data-testid="msg-assistant" key={`b${bi}`}>
+                <StreamingText content={tokenizeStreaming(entry.block.text)} />
+              </div>
+            ) : (
+              <ChatBlock key={`b${bi}`} block={entry.block} cwd={cwd} cwds={cwds} />
+            )
           ) : null,
         )}
       {!collapsed && stats.files.length > 0 && <TurnFilesCard files={stats.files} />}
@@ -737,6 +791,41 @@ function TurnFilesCard({ files }: { files: string[] }) {
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * V4 F1 frozen thinking row — weakened, expandable, never prose.
+ * V10 任务B: a process block (captured `·` status lines) expands to its raw
+ * captured text. The detail is MOUNTED only while the row is open (controlled
+ * `<details>`): collapsed process text must not exist in the DOM at all, so
+ * it can never leak into a text-content assertion or a screen reader.
+ */
+function ThinkingRowBlock({ block }: { block: Block }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <details
+      className="chat-thinking"
+      data-testid="thinking-row"
+      open={open}
+      onToggle={(e) => setOpen(e.currentTarget.open)}
+    >
+      <summary>
+        <IconClock size={12} />
+        <span>思考 {block.text || "…"}</span>
+        <span className="thinking-hint hint-collapsed">已折叠 · 点击展开</span>
+        <span className="thinking-hint hint-open">点击收起</span>
+      </summary>
+      <div className="thinking-body">
+        {block.detail ? (
+          open ? (
+            <div className="thinking-raw">{block.detail}</div>
+          ) : null
+        ) : (
+          "思考过程已被 agent 折叠。在终端原始输出里按 ctrl+o 可查看完整原文。"
+        )}
+      </div>
+    </details>
   );
 }
 
@@ -799,20 +888,10 @@ const ChatBlock = memo(
           </pre>
         );
       case "thinking":
-        /* V4 F1: collapsed thinking row — weakened, expandable, never prose. */
-        return (
-          <details className="chat-thinking" data-testid="thinking-row">
-            <summary>
-              <IconClock size={12} />
-              <span>思考 {block.text || "…"}</span>
-              <span className="thinking-hint hint-collapsed">已折叠 · 点击展开</span>
-              <span className="thinking-hint hint-open">点击收起</span>
-            </summary>
-            <div className="thinking-body">
-              思考过程已被 agent 折叠。在终端原始输出里按 ctrl+o 可查看完整原文。
-            </div>
-          </details>
-        );
+        /* V4 F1: collapsed thinking row — weakened, expandable, never prose.
+           V10 任务B: process blocks expand to their captured raw text (see
+           ThinkingRowBlock). */
+        return <ThinkingRowBlock block={block} />;
       case "meta":
         /* V4 F1: meta is a weak separator row — deliberately NOT under the
            `msg-*` namespace so status text never counts as message content. */
